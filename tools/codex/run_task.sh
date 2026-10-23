@@ -13,6 +13,7 @@
 #   CODEX_BIN     Codex CLI 的路徑。Windows 的 npm 版在 %APPDATA%\npm\codex.cmd；
 #                 Microsoft Store 版 App 的執行檔在受保護資料夾，無法從外部呼叫。
 #   CODEX_EFFORT  推理強度，預設 medium（生圖幾乎不需要推理）。
+#   CODEX_SANDBOX 沙盒模式，預設 workspace-write；做程式碼審查時用 read-only（只讀、不能改檔）。
 #   CODEX_EXTRA   額外參數（例如 "-m 模型名"）。
 set -u
 
@@ -38,7 +39,7 @@ for f in "$@"; do
   args+=(-i "$RAW/$f")
 done
 
-"$CODEX_BIN" exec -C "$ROOT" -s workspace-write --skip-git-repo-check \
+"$CODEX_BIN" exec -C "$ROOT" -s "${CODEX_SANDBOX:-workspace-write}" --skip-git-repo-check \
   -c "model_reasoning_effort=\"${CODEX_EFFORT:-medium}\"" ${CODEX_EXTRA:-} \
   "${args[@]}" -o "$OUT/${name}_last.txt" --json - \
   < "$task" > "$OUT/$name.jsonl" 2> "$OUT/$name.err"

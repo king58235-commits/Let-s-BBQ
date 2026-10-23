@@ -19,6 +19,14 @@ python tools/check_raw.py ing_pork
 python tools/process_assets.py
 ```
 
+## 程式碼審查（唯讀）
+```bash
+# 任務檔寫「請審查…、不要修改任何檔案」，用唯讀沙盒執行
+CODEX_SANDBOX=read-only tools/codex/run_task.sh review_index
+```
+結果在 `tools/codex/out/review_index_last.txt`；值得保留的整理到 `docs/reviews/`。範例：`tasks/review_index.txt` 與 `docs/reviews/2026-10-23_codex_review_index.md`。
+接續同一場對話：`codex exec resume --last`（未在本專案實測）。
+
 ## 看用量
 ```python
 import json
