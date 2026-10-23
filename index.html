@@ -256,7 +256,7 @@ function endGame() {
   G.newBest = G.score > best;
   Sound.play('over'); if (G.newBest) Sound.play('record');
   if (G.newBest) {                                              // 新紀錄：從上方灑彩帶
-    for (let k = 0; k < 4; k++) FX.emit(14, { x: 90 + k * 120, y: 70, angle: Math.PI / 2, arc: 1.6, speed: 150, life: 2.2, size: 8, color: ['#ffd54f', '#ff8a65', '#c900df', '#19e3a0', '#fff'], kind: 'spark', g: 160, drag: 0.4 });
+    for (let k = 0; k < 4; k++) FX.emit(14, { x: 90 + k * 120, y: 70, angle: Math.PI / 2, arc: 1.6, speed: 150, life: 2.2, size: 8, color: ['#ffd54f', '#ff8a65', '#e0412c', '#f5922f', '#fff8e8'], kind: 'spark', g: 160, drag: 0.4 });
   }
   if (G.newBest) { best = G.score; try { localStorage.setItem('bbq_best', best); } catch (e) {} }
 }
@@ -994,12 +994,27 @@ function drawBackground() {
   }
   // 烤架區 / 下方
   ctx.fillStyle = '#1a1512'; ctx.fillRect(0, 318, W, 330);
-  ctx.fillStyle = '#121516'; ctx.fillRect(0, 648, W, H - 648);
-  ctx.strokeStyle = 'rgba(255,255,255,.035)'; ctx.lineWidth = 1;          // 細網格底
-  ctx.beginPath();
-  for (let x = 0; x <= W; x += 30) { ctx.moveTo(x + .5, 648); ctx.lineTo(x + .5, H); }
-  for (let y = 648; y <= H; y += 30) { ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); }
-  ctx.stroke();
+  ctx.drawImage(waveLayer(), 0, 648 - 318, W, H - 648, 0, 648, W, H - 648);   // 下方操作區：夜藍色的海浪紋底
+}
+
+// 青海波紋（深夜藍底、淡淡的同心弧）。只畫一次，快取成圖
+let WAVE = null;
+function waveLayer() {
+  if (WAVE) return WAVE;
+  WAVE = document.createElement('canvas'); WAVE.width = W; WAVE.height = H - 318;
+  const g = WAVE.getContext('2d'), R = 27;
+  g.fillStyle = UI.night; g.fillRect(0, 0, W, WAVE.height);
+  for (let j = 0; j * R * 0.5 < WAVE.height + R; j++) {
+    for (let i = -1; i * R * 2 < W + R * 2; i++) {
+      const cx = i * R * 2 + (j % 2) * R, cy = j * R * 0.5;
+      for (let k = 3; k >= 1; k--) {
+        g.beginPath(); g.arc(cx, cy, R * k / 3, 0, Math.PI * 2);
+        g.fillStyle = k % 2 ? UI.night : '#1a1f45'; g.fill();
+        g.strokeStyle = 'rgba(170,180,255,.13)'; g.lineWidth = 1.5; g.stroke();
+      }
+    }
+  }
+  return WAVE;
 }
 
 function drawProceduralSky() {
@@ -1031,10 +1046,11 @@ function keycap(x, y, label, active) {
   if (touchMode) return;
   ctx.font = `900 12px ${FONT}`;
   const w = Math.max(22, ctx.measureText(label).width + 14), h = 20;
-  // 純平面小標籤：淺底深字，沒有陰影、描邊或厚度，放在深色衣服或炭火上都醒目；亮起時是金色
-  ctx.fillStyle = active ? '#ffd54f' : '#eef0fb';
+  // 純平面小標籤：奶油底、墨色細框；亮起時是金色。放在深色或奶油色卡片上都看得清楚
+  ctx.fillStyle = active ? UI.gold : UI.paperLight;
   rr(x - w / 2, y - h / 2, w, h, 6); ctx.fill();
-  T(label, x, y + 0.5, 12, active ? '#3a2400' : '#1b2147', 'center', '900');
+  ctx.strokeStyle = UI.ink; ctx.lineWidth = 2; ctx.stroke();
+  T(label, x, y + 0.5, 12, UI.ink, 'center', '900');
 }
 
 // 復原圖示（向量箭頭）。不用 ↩ 字元，因為系統會把它渲染成彩色 emoji 方塊
@@ -1056,25 +1072,19 @@ function drawUndoIcon(cx, cy, s, color) {
 function drawHUD() {
   const k = G.timeLeft / CFG.gameSeconds, low = G.timeLeft <= 10;
   const pulse = low ? 0.5 + 0.5 * Math.sin(clock * 9) : 0;
-  // 暫停鈕：米色方塊 + 左上小綠缺角
+  // 暫停鈕：奶油色圓角方塊
   const pz = L.pause;
-  ctx.fillStyle = UI.beige; rr(pz.x, pz.y, 34, 34, 8); ctx.fill(); uiNotch(pz.x, pz.y, 9);
+  ctx.fillStyle = UI.paper; rr(pz.x, pz.y, 34, 34, 10); ctx.fill(); ctx.strokeStyle = UI.ink; ctx.lineWidth = 2.5; ctx.stroke();
   ctx.fillStyle = UI.ink; rr(pz.x + 10, pz.y + 9, 5, 16, 2); ctx.fill(); rr(pz.x + 19, pz.y + 9, 5, 16, 2); ctx.fill();
-  // 剩餘時間：米色標籤，最後 10 秒轉紅色閃爍
-  ctx.fillStyle = low ? `rgb(255,${170 + pulse * 60 | 0},${170 + pulse * 60 | 0})` : UI.beige;
-  rr(48, 9, 76, 34, 8); ctx.fill(); uiNotch(48, 9, 9);
-  T('TIME', 62, 19, 9, '#6a645a', 'left', '800');
+  // 剩餘時間：票券，最後 10 秒轉紅色閃爍
+  uiTicket(48, 9, 76, 34, low ? `rgb(255,${150 + pulse * 70 | 0},${130 + pulse * 70 | 0})` : UI.paper, 4);
+  T('TIME', 62, 19, 9, UI.inkSoft, 'left', '800');
   T(String(Math.ceil(G.timeLeft)), 118, 29, 23, low ? '#a3121f' : UI.ink, 'right', '900');
-  // 進度條：深色軌道、金色漸層；月亮是滑塊；圓點標出新食材解鎖的時間
+  // 進度條：深色軌道、單色實心的橘色（最後 10 秒轉紅）；月亮是滑塊；圓點標出新食材解鎖的時間
   const bx = 134, bw = 256, by = 17, bh = 18, fw = Math.max(0, bw * k);
-  ctx.fillStyle = UI.deep; rr(bx - 4, by - 4, bw + 8, bh + 8, 11); ctx.fill();
-  ctx.strokeStyle = low ? '#ff8a80' : 'rgba(227,219,203,.85)'; ctx.lineWidth = 2; ctx.stroke();
-  if (fw > 3) {
-    const g = ctx.createLinearGradient(bx, 0, bx + bw, 0);
-    if (low) { g.addColorStop(0, '#ff5252'); g.addColorStop(1, '#ff9e80'); }
-    else { g.addColorStop(0, '#ff9800'); g.addColorStop(1, '#ffe082'); }
-    ctx.fillStyle = g; rr(bx, by, fw, bh, 8); ctx.fill();
-  }
+  ctx.fillStyle = UI.nightDeep; rr(bx - 4, by - 4, bw + 8, bh + 8, 13); ctx.fill();
+  ctx.strokeStyle = low ? '#ff8a80' : UI.paper; ctx.lineWidth = 2.5; ctx.stroke();
+  if (fw > 3) { ctx.fillStyle = low ? '#ff5a45' : UI.orange; rr(bx, by, fw, bh, 9); ctx.fill(); }
   INGREDIENTS.forEach((ing, i) => {
     if (!ing.unlockAt) return;
     const mx = bx + bw * (1 - ing.unlockAt / CFG.gameSeconds);
@@ -1092,16 +1102,16 @@ function drawHUD() {
   ctx.save(); ctx.shadowColor = 'rgba(255,230,150,.95)'; ctx.shadowBlur = 12;
   T('🌕', bx + fw, by + bh / 2 + 1, 26, '#fff', 'center', '400');
   ctx.restore();
-  // 分數：米色標籤
-  ctx.fillStyle = UI.beige; rr(406, 9, 126, 34, 8); ctx.fill(); uiNotch(406, 9, 9);
-  T('SCORE', 420, 19, 9, '#6a645a', 'left', '800');
+  // 分數：票券
+  uiTicket(406, 9, 126, 34, UI.paper, 4);
+  T('SCORE', 420, 19, 9, UI.inkSoft, 'left', '800');
   ctx.save(); ctx.translate(524, 29); ctx.scale(1 + FX.bump * 0.7, 1 + FX.bump * 0.7);
   T(String(Math.round(G.shown)), 0, 0, 23, UI.ink, 'right', '900');
   ctx.restore();
-  // 完美連擊：洋紅標籤
+  // 完美連擊：燈籠紅的小標籤
   if (G.streak >= 2) {
-    ctx.fillStyle = UI.magenta; rr(8, 48, 104, 20, 6); ctx.fill();
-    T('🔥 連擊 x' + G.streak, 60, 58, 13, '#fff', 'center', '800');
+    ctx.fillStyle = UI.red; rr(8, 48, 104, 20, 10); ctx.fill();
+    T('🔥 連擊 x' + G.streak, 60, 58, 13, '#fff8e8', 'center', '800');
   }
   // 最後 5 秒大倒數
   if (G.timeLeft <= 5) {
@@ -1134,8 +1144,8 @@ function drawBubble(y, order, headY) {
   const mult = CFG.orderMult[n] || 1;                               // 複雜點單：氣泡右上角標出分數倍率
   if (mult > 1) {
     const hot = n >= 4, tw = 34, tx = -tw / 2, ty = y - 9;                 // 置中在上緣：不會被隔壁的氣泡蓋到
-    ctx.fillStyle = hot ? UI.magenta : '#ffd54f'; rr(tx, ty, tw, 17, 5); ctx.fill();
-    T('×' + mult, tx + tw / 2, ty + 9, 11, hot ? '#fff' : '#3a2400', 'center', '900');
+    ctx.fillStyle = hot ? UI.red : UI.gold; rr(tx, ty, tw, 17, 8.5); ctx.fill();
+    T('×' + mult, tx + tw / 2, ty + 9, 11, hot ? '#fff8e8' : UI.ink, 'center', '900');
   }
   order.forEach((id, k) => {
     const cx = x + 5 + 14 + k * 28, cy = y + h / 2;
@@ -1277,57 +1287,58 @@ function button(r, fill, stroke, radius = 14) {
 }
 
 function drawAssemblyRow() {
-  // 組裝區
-  button(L.asm, '#1e2324', '#6b4c8f');
+  // 組裝區：奶油色的菜單卡
+  button(L.asm, UI.paper, UI.ink);
   const a = L.asm;
   for (let k = 0; k < CFG.maxSkewer; k++) {
     const x = a.x + 34 + k * 62;
     if (k >= G.assembly.length) {
-      ctx.setLineDash([5, 5]); ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]); ctx.strokeStyle = 'rgba(59,42,34,.3)'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(x + 4, a.y + 47, 22, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
     }
   }
   if (G.assembly.length) {
-    ctx.strokeStyle = '#c8a46a'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.strokeStyle = '#a66d34'; ctx.lineWidth = 5; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(a.x + 12, a.y + 49); ctx.lineTo(a.x + a.w - 10, a.y + 45); ctx.stroke();
     G.assembly.forEach((id, k) => {
       const pop = k === G.assembly.length - 1 ? Math.max(0, 1 - (clock - G.asmT) / 0.2) : 0;   // 剛加的那個彈一下
       drawItem(id, a.x + 38 + k * 62, a.y + 47 - 8 * pop, 46 * (1 + 0.3 * pop), -1);
     });
   } else if (!G.held) {
-    T('點下方食材開始串', a.x + a.w / 2, a.y + 47, 16, 'rgba(255,255,255,.4)');
+    T('點下方食材開始串', a.x + a.w / 2, a.y + 47, 16, UI.inkSoft);
   }
   // 復原
   const u = L.undo;
-  button(u, '#1e2324', '#6b4c8f');
-  drawUndoIcon(u.x + u.w / 2, u.y + 38, 22, G.assembly.length ? '#fff' : 'rgba(255,255,255,.3)');
+  button(u, UI.paper, UI.ink);
+  drawUndoIcon(u.x + u.w / 2, u.y + 38, 22, G.assembly.length ? UI.ink : 'rgba(59,42,34,.28)');
   keycap(u.x + u.w / 2, u.y + 76, '⌫', false);
   // 放上烤架（文字與鍵帽分區排好，不互相壓到）
   const p = L.place, ok = G.assembly.length > 0;
-  button(p, ok ? '#19e3a0' : '#1b2523', ok ? '#a8ffe0' : '#2d4a40');
-  T('放上', p.x + p.w / 2, p.y + 23, 20, ok ? '#06241a' : 'rgba(255,255,255,.35)');
-  T('烤架', p.x + p.w / 2, p.y + 47, 20, ok ? '#06241a' : 'rgba(255,255,255,.35)');
+  button(p, ok ? UI.red : UI.paperDark, ok ? UI.ink : 'rgba(59,42,34,.45)');
+  T('放上', p.x + p.w / 2, p.y + 23, 20, ok ? '#fff8e8' : 'rgba(59,42,34,.4)');
+  T('烤架', p.x + p.w / 2, p.y + 47, 20, ok ? '#fff8e8' : 'rgba(59,42,34,.4)');
   keycap(p.x + p.w / 2, p.y + 76, 'Space', ok);
-  // 垃圾桶
+  // 垃圾桶：手上有串時變紅閃爍
   const t = L.trash, hot = !!G.held;
   const pulse = hot ? 0.5 + 0.5 * Math.sin(clock * 8) : 0;
-  button(t, hot ? '#4a1f27' : '#2a1d20', hot ? `rgb(255,${120 + pulse * 100 | 0},${140 + pulse * 90 | 0})` : '#6b3a46');
+  button(t, hot ? `rgb(255,${130 + pulse * 70 | 0},${100 + pulse * 60 | 0})` : UI.paperDark, UI.ink);
   if (artReady(ART.icon_trash)) ctx.drawImage(ART.icon_trash, t.x + t.w / 2 - 22, t.y + 6, 44, 44);
   else T('🗑', t.x + t.w / 2, t.y + 28, 30, '#fff', 'center', '400');
-  T('丟棄', t.x + t.w / 2, t.y + 59, 15, 'rgba(255,255,255,.85)');
+  T('丟棄', t.x + t.w / 2, t.y + 59, 15, UI.ink);
   keycap(t.x + t.w / 2, t.y + 79, 'X', hot);
 }
 
 function drawTray() {
   INGREDIENTS.forEach((ing, i) => {
     const r = L.tray(i), open = G.unlocked[i];
-    button(r, open ? '#1e2324' : '#161a1b', open ? ing.color : '#2e3436', 12);
+    button(r, open ? UI.paper : UI.paperDark, open ? UI.ink : 'rgba(59,42,34,.4)', 12);
     if (open) {
+      ctx.fillStyle = ing.color; rr(r.x + 14, r.y + r.h - 14, r.w - 28, 6, 3); ctx.fill();   // 每種食材自己的色條，色相一眼可辨
       drawItem(ing.id, r.x + r.w / 2, r.y + 44, 52, -1);
-      T(ing.name, r.x + r.w / 2, r.y + 90, 16, '#fff');
+      T(ing.name, r.x + r.w / 2, r.y + 85, 16, UI.ink, 'center', '800');
     } else {
       T('🔒', r.x + r.w / 2, r.y + 44, 32, '#fff', 'center', '400');
-      T(Math.max(0, Math.ceil(ing.unlockAt - elapsed())) + '秒後', r.x + r.w / 2, r.y + 90, 14, 'rgba(255,255,255,.5)');
+      T(Math.max(0, Math.ceil(ing.unlockAt - elapsed())) + '秒後', r.x + r.w / 2, r.y + 90, 14, UI.inkSoft);
     }
     keycap(r.x + 14, r.y + 14, String(i + 1), false);
     if (open && G.newBadge[i] > 0) uiBadge(r.x + r.w - 8, r.y + 8);   // 剛解鎖的新食材
@@ -1337,20 +1348,20 @@ function drawTray() {
 function drawFire() {
   const lo = fire <= CFG.fireMin, hi = fire >= CFG.fireMax;
   const col = fire > 1.05 ? '#ffab40' : fire < 0.95 ? '#90caf9' : '#fff';
-  button(L.fireMinus, '#1e2324', '#6b4c8f', 10);
-  T('−', L.fireMinus.x + 22, L.fireMinus.y + 17, 24, lo ? 'rgba(255,255,255,.3)' : '#fff');
-  button(L.fireLabel, '#161a1b', '#3a3f56', 10);
+  button(L.fireMinus, UI.paper, UI.ink, 10);
+  T('−', L.fireMinus.x + 22, L.fireMinus.y + 17, 24, lo ? 'rgba(59,42,34,.3)' : UI.ink);
+  button(L.fireLabel, '#232853', '#4a5199', 10);
   T('🔥 火力 ' + Math.round(fire * 100) + '%', L.fireLabel.x + 72, L.fireLabel.y + 17, 17, col);
-  button(L.firePlus, '#1e2324', '#6b4c8f', 10);
-  T('+', L.firePlus.x + 22, L.firePlus.y + 17, 24, hi ? 'rgba(255,255,255,.3)' : '#fff');
+  button(L.firePlus, UI.paper, UI.ink, 10);
+  T('+', L.firePlus.x + 22, L.firePlus.y + 17, 24, hi ? 'rgba(59,42,34,.3)' : UI.ink);
   drawSoundButtons();
 }
 
 // 左下角的音效／音樂開關（向量圖示，關閉時變暗並畫紅色斜線）
 function drawSoundButtons() {
   [[L.sndSfx, Sound.sfx, 'sfx'], [L.sndMus, Sound.music, 'music'], ...(Haptic.can ? [[L.sndVib, Haptic.on, 'vib']] : [])].forEach(([r, on, kind]) => {
-    button(r, '#1e2324', '#6b4c8f', 10);
-    const cx = r.x + r.w / 2, cy = r.y + r.h / 2, col = on ? '#fff' : 'rgba(255,255,255,.35)';
+    button(r, UI.paper, UI.ink, 10);
+    const cx = r.x + r.w / 2, cy = r.y + r.h / 2, col = on ? UI.ink : 'rgba(59,42,34,.32)';
     ctx.save(); ctx.fillStyle = col; ctx.strokeStyle = col; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
     if (kind === 'sfx') {
       ctx.beginPath(); ctx.moveTo(cx - 10, cy - 4); ctx.lineTo(cx - 5, cy - 4); ctx.lineTo(cx + 1, cy - 9); ctx.lineTo(cx + 1, cy + 9); ctx.lineTo(cx - 5, cy + 4); ctx.lineTo(cx - 10, cy + 4); ctx.closePath(); ctx.fill();
@@ -1362,7 +1373,7 @@ function drawSoundButtons() {
       ctx.beginPath(); ctx.ellipse(cx - 4, cy + 6, 4.5, 3.5, -0.3, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.moveTo(cx - 0.5, cy + 5); ctx.lineTo(cx - 0.5, cy - 9); ctx.lineTo(cx + 7, cy - 6); ctx.stroke();
     }
-    if (!on) { ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(cx - 11, cy + 11); ctx.lineTo(cx + 11, cy - 11); ctx.stroke(); }
+    if (!on) { ctx.strokeStyle = UI.red; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(cx - 11, cy + 11); ctx.lineTo(cx + 11, cy - 11); ctx.stroke(); }
     ctx.restore();
   });
 }
@@ -1399,71 +1410,88 @@ function drawPopups() {
   ctx.globalAlpha = 1;
 }
 
-/* ---------- UI 元件（風格參考公司專案：炭灰底、洋紅標題列、米色標籤、綠紫漸層邊框；稍微偏向，不照抄） ---------- */
-const UI = { panel: '#1b2021', deep: '#101314', magenta: '#c900df', violet: '#9c43d3', mint: '#19e3a0', beige: '#e3dbcb', beigeDark: '#c6bfaf', ink: '#2a2622', red: '#ff3b5c', dim: '#9fb0b0' };
+/* ---------- UI 元件（夜市燈籠風：奶油色紙卡、墨色粗框、燈籠紅橘、票券缺口；全部純平面） ---------- */
+const UI = {
+  paper: '#f7ecd4', paperLight: '#fff8e8', paperDark: '#e6d4ae',   // 紙卡三階
+  ink: '#3b2a22', inkSoft: '#7a6652',                               // 墨色（框線與文字）
+  night: '#161a3c', nightDeep: '#0f1230',                           // 夜色底
+  red: '#e0412c', redDark: '#b5301f', orange: '#f5922f', gold: '#ffd36b',
+  dim: '#b9b4d4',
+};
 
-// 左上角的小綠缺角（米色標籤與按鈕的記號）
-function uiNotch(x, y, s = 9) {
-  ctx.fillStyle = UI.mint;
-  ctx.beginPath(); ctx.moveTo(x + 1, y + 1); ctx.lineTo(x + s, y + 1); ctx.lineTo(x + 1, y + s); ctx.closePath(); ctx.fill();
+// 票券外形：左右兩側各挖一個半圓缺口（缺口會透出底下的畫面）
+function ticketPath(x, y, w, h, r = 8, n = 5) {
+  const cy = y + h / 2;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, cy - n); ctx.arc(x + w, cy, n, -Math.PI / 2, Math.PI / 2, true);
+  ctx.lineTo(x + w, y + h - r); ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h); ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, cy + n); ctx.arc(x, cy, n, Math.PI / 2, -Math.PI / 2, true);
+  ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r); ctx.closePath();
+}
+function uiTicket(x, y, w, h, fill, n = 5) {
+  ticketPath(x, y, w, h, 8, n);
+  ctx.fillStyle = fill; ctx.fill();
+  ctx.strokeStyle = UI.ink; ctx.lineWidth = 2.5; ctx.stroke();
 }
 
-// 深色面板 + 上紫下青綠的漸層邊框
+// 奶油色紙卡 + 墨色外框 + 內側虛線（像貼紙或印章邊）
 function uiPanel(x, y, w, h, r = 22, lw = 4) {
-  ctx.fillStyle = UI.panel; rr(x, y, w, h, r); ctx.fill();
-  const g = ctx.createLinearGradient(0, y, 0, y + h);
-  g.addColorStop(0, UI.violet); g.addColorStop(0.55, '#5a6bd8'); g.addColorStop(1, UI.mint);
-  ctx.strokeStyle = g; ctx.lineWidth = lw; rr(x, y, w, h, r); ctx.stroke();
+  ctx.fillStyle = UI.paper; rr(x, y, w, h, r); ctx.fill();
+  ctx.strokeStyle = UI.ink; ctx.lineWidth = lw; rr(x, y, w, h, r); ctx.stroke();
+  const m = Math.max(5, lw + 3);
+  ctx.save(); ctx.setLineDash([7, 6]); ctx.strokeStyle = 'rgba(59,42,34,.28)'; ctx.lineWidth = 1.5;
+  rr(x + m, y + m, w - m * 2, h - m * 2, Math.max(4, r - m)); ctx.stroke(); ctx.restore();
 }
 
-// 洋紅標題列，兩端有深色棋盤格；通常壓在面板的上緣
+// 布條標題：燈籠紅的主體，兩端是深紅色的燕尾；通常壓在面板的上緣
 function uiTitleBar(cx, y, w, text, size = 24) {
-  const h = 38, x = cx - w / 2, c = h / 6;
-  ctx.fillStyle = UI.magenta; ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = '#3b0044';
-  for (const ex of [x, x + w - c * 4]) for (let i = 0; i < 4; i++) for (let j = 0; j < 6; j++) if ((i + j) % 2 === 0) ctx.fillRect(ex + i * c, y + j * c, c, c);
-  T(text, cx, y + h / 2 + 1, size, '#fff', 'center', '900');
+  const h = 38, x = cx - w / 2, t = 18;
+  ctx.fillStyle = UI.redDark;
+  ctx.beginPath(); ctx.moveTo(x - t, y + 9); ctx.lineTo(x + 12, y + 9); ctx.lineTo(x + 12, y + h + 9); ctx.lineTo(x - t, y + h + 9); ctx.lineTo(x - t + 9, y + 9 + h / 2); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x + w + t, y + 9); ctx.lineTo(x + w - 12, y + 9); ctx.lineTo(x + w - 12, y + h + 9); ctx.lineTo(x + w + t, y + h + 9); ctx.lineTo(x + w + t - 9, y + 9 + h / 2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = UI.red; rr(x, y, w, h, 6); ctx.fill();
+  ctx.strokeStyle = UI.ink; ctx.lineWidth = 2.5; rr(x, y, w, h, 6); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,211,107,.9)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x + 10, y + 5); ctx.lineTo(x + w - 10, y + 5); ctx.moveTo(x + 10, y + h - 5); ctx.lineTo(x + w - 10, y + h - 5); ctx.stroke();
+  T(text, cx, y + h / 2 + 1, size, '#fff8e8', 'center', '900');
 }
 
-// 菱形 X（對話框下緣的關閉鈕）
-function uiDiamondX(cx, cy, s = 20) {
-  ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.PI / 4);
-  ctx.fillStyle = '#15181a'; ctx.fillRect(-s * .72, -s * .72, s * 1.44, s * 1.44);
-  const g = ctx.createLinearGradient(-s, -s, s, s); g.addColorStop(0, UI.violet); g.addColorStop(1, UI.mint);
-  ctx.strokeStyle = g; ctx.lineWidth = 3; ctx.strokeRect(-s * .72, -s * .72, s * 1.44, s * 1.44);
-  ctx.restore();
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+// 圓形 X（對話框下緣的關閉鈕）
+function uiCloseX(cx, cy, s = 20) {
+  ctx.fillStyle = UI.red; ctx.beginPath(); ctx.arc(cx, cy, s * 1.05, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = UI.ink; ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = '#fff8e8'; ctx.lineWidth = 4; ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(cx - 7, cy - 7); ctx.lineTo(cx + 7, cy + 7); ctx.moveTo(cx + 7, cy - 7); ctx.lineTo(cx - 7, cy + 7); ctx.stroke();
 }
 
-// 紅色菱形提示（新食材、待處理）
+// 紅色圓點提示（新食材、待處理）
 function uiBadge(cx, cy, s = 9) {
-  ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.PI / 4);
-  ctx.fillStyle = UI.red; ctx.fillRect(-s * .72, -s * .72, s * 1.44, s * 1.44);
-  ctx.restore();
-  T('!', cx, cy + 1, 12, '#fff', 'center', '900');
+  ctx.fillStyle = UI.red; ctx.beginPath(); ctx.arc(cx, cy, s + 1, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = UI.ink; ctx.lineWidth = 2; ctx.stroke();
+  T('!', cx, cy + 1, 12, '#fff8e8', 'center', '900');
 }
 
-// 米色資訊標籤
+// 票券資訊標籤
 function uiChip(x, y, w, h, text, size = 15) {
-  ctx.fillStyle = UI.beige; rr(x, y, w, h, 7); ctx.fill();
-  uiNotch(x, y, 9);
+  uiTicket(x, y, w, h, UI.paperLight, Math.min(6, h / 4));
   T(text, x + w / 2, y + h / 2 + 1, size, UI.ink, 'center', '900');
 }
 
-// 純平面按鈕：primary = 青綠實心；beige = 米色（左上小綠缺角）。sub 是上方的英文小標籤
+// 純平面按鈕：primary = 燈籠紅；其他 = 奶油色。sub 是上方的英文小標籤；一律墨色粗框
 function uiButton(r, text, kind, sub, pulse) {
   const sc = pulse ? 1 + 0.02 * Math.sin(clock * 4) : 1;
   ctx.save();
   ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(sc, sc); ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
   const primary = kind === 'primary', big = r.h >= 60;
-  ctx.fillStyle = primary ? UI.mint : UI.beige;
-  rr(r.x, r.y, r.w, r.h, 10); ctx.fill();
-  if (!primary) uiNotch(r.x, r.y, 11);
-  const col = primary ? '#06241a' : UI.ink;
+  ctx.fillStyle = primary ? UI.red : UI.paper;
+  rr(r.x, r.y, r.w, r.h, Math.min(r.h / 2, 24)); ctx.fill();
+  ctx.strokeStyle = UI.ink; ctx.lineWidth = 3; ctx.stroke();
+  const col = primary ? '#fff8e8' : UI.ink;
   if (sub) {
     if ('letterSpacing' in ctx) ctx.letterSpacing = '2px';
-    T(sub, r.x + r.w / 2, r.y + (big ? 17 : 13), big ? 12 : 10, primary ? 'rgba(6,36,26,.7)' : '#7a7266', 'center', '800');
+    T(sub, r.x + r.w / 2, r.y + (big ? 17 : 13), big ? 12 : 10, primary ? 'rgba(255,248,232,.78)' : UI.inkSoft, 'center', '800');
     if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
     T(text, r.x + r.w / 2, r.y + r.h / 2 + (big ? 9 : 7), big ? 28 : 20, col, 'center', '900');
   } else {
@@ -1486,9 +1514,7 @@ function drawFace(id, cx, cy, r) {
 }
 
 function drawTitle() {
-  const g = ctx.createLinearGradient(0, 318, 0, H);
-  g.addColorStop(0, '#171c1d'); g.addColorStop(1, '#0b0e0f');
-  ctx.fillStyle = g; ctx.fillRect(0, 318, W, H - 318);
+  ctx.drawImage(waveLayer(), 0, 318);                 // 下半部整片換成夜藍海浪紋
   // 站在櫃台後面的一排客人
   const ids = ['bear', 'rabbit', 'fox', 'panda', 'wolf'];
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, QUEUE.counterY); ctx.clip();
@@ -1509,11 +1535,12 @@ function drawTitle() {
   ];
   steps.forEach((st, i) => {
     const x = 30 + i * 165, w = 150, cx = x + w / 2;
-    uiPanel(x, 478, w, 124, 14, 2.5);
-    ctx.fillStyle = UI.magenta; ctx.beginPath(); ctx.arc(x + 18, 496, 11, 0, Math.PI * 2); ctx.fill();
-    T(st.n, x + 18, 497, 14, '#fff', 'center', '900');
+    uiPanel(x, 478, w, 124, 14, 3);
+    ctx.fillStyle = UI.red; ctx.beginPath(); ctx.arc(x + 20, 498, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = UI.ink; ctx.lineWidth = 2; ctx.stroke();
+    T(st.n, x + 20, 499, 14, '#fff8e8', 'center', '900');
     st.icon(cx);
-    T(st.label, cx, 580, 17, '#fff', 'center', '800');
+    T(st.label, cx, 580, 17, UI.ink, 'center', '800');
   });
   T('烤焦或串錯了？拿起來丟進垃圾桶', W / 2, 634, 17, '#cfd8dc');
   T('一局 ' + CFG.gameSeconds + ' 秒 · 客人越來越多', W / 2, 662, 17, '#cfd8dc');
@@ -1524,7 +1551,7 @@ function drawTitle() {
   } else {
     const p = artDone / artTotal;
     ctx.fillStyle = 'rgba(255,255,255,.12)'; rr(110, 770, 320, 14, 7); ctx.fill();
-    ctx.fillStyle = UI.mint; rr(110, 770, Math.max(10, 320 * p), 14, 7); ctx.fill();
+    ctx.fillStyle = UI.orange; rr(110, 770, Math.max(10, 320 * p), 14, 7); ctx.fill();
     T('載入美術中… ' + artDone + '/' + artTotal, W / 2, 810, 16, '#cfd8dc');
   }
   T('火力可在下方調整', W / 2, 884, 14, 'rgba(255,255,255,.45)');
@@ -1532,30 +1559,29 @@ function drawTitle() {
 
 function drawOver() {
   const st = G.stats, sc = G.score, rk = rankOf(sc);
-  ctx.fillStyle = 'rgba(4,6,10,.86)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(10,12,34,.86)'; ctx.fillRect(0, 0, W, H);
   uiPanel(36, 112, 468, 664, 24);
   uiTitleBar(W / 2, 92, 300, '時間到！', 26);
   const k = Math.min(1, overAge / 1.2), shown = Math.round(sc * (1 - Math.pow(1 - k, 3)));   // 分數數字跳上去
   if ('letterSpacing' in ctx) ctx.letterSpacing = '3px';
-  T('SCORE', W / 2, 168, 13, UI.dim, 'center', '800');
+  T('SCORE', W / 2, 168, 13, UI.inkSoft, 'center', '800');
   if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
-  T(String(shown), W / 2, 226, 76, '#fff', 'center', '900');
-  if (G.newBest) { ctx.fillStyle = UI.magenta; rr(W / 2 - 80, 268, 160, 32, 7); ctx.fill(); T('🎉 新紀錄！', W / 2, 285, 19, '#fff', 'center', '900'); }
+  T(String(shown), W / 2, 226, 76, UI.ink, 'center', '900');
+  if (G.newBest) { ctx.fillStyle = UI.red; rr(W / 2 - 80, 268, 160, 32, 16); ctx.fill(); ctx.strokeStyle = UI.ink; ctx.lineWidth = 2.5; ctx.stroke(); T('🎉 新紀錄！', W / 2, 285, 19, '#fff8e8', 'center', '900'); }
   else uiChip(W / 2 - 90, 268, 180, 32, 'BEST   ' + best, 16);
-  // 稱號
-  ctx.fillStyle = '#12161a'; rr(110, 322, 320, 56, 10); ctx.fill();
-  ctx.strokeStyle = rk.color; ctx.lineWidth = 2.5; rr(110, 322, 320, 56, 10); ctx.stroke();
+  // 稱號：墨色的牌子，字用該等級的顏色
+  ctx.fillStyle = UI.ink; rr(110, 322, 320, 56, 14); ctx.fill();
+  ctx.strokeStyle = rk.color; ctx.lineWidth = 2.5; rr(116, 328, 308, 44, 10); ctx.stroke();
   T(rk.name, W / 2, 350, 28, rk.color, 'center', '900');
-  for (let i = 0; i < CFG.ranks.length; i++) T('★', W / 2 + (i - 1.5) * 34, 404, 26, i <= rk.idx ? '#ffd54f' : 'rgba(255,255,255,.18)', 'center', '900');
+  for (let i = 0; i < CFG.ranks.length; i++) T('★', W / 2 + (i - 1.5) * 34, 404, 26, i <= rk.idx ? UI.orange : 'rgba(59,42,34,.16)', 'center', '900');
   // 成績明細：米色資訊列，右側是數值框
   const rows = [['✨', '完美', st.perfect], ['😋', '熟了', st.good], ['😐', '沒熟', st.meh], ['🔥', '生／焦', st.bad], ['❌', '送錯', st.wrong], ['💢', '氣走', st.walkout]];
   rows.forEach(([ic, label, n], i) => {
     const x = i % 2 ? 282 : 54, y = 436 + Math.floor(i / 2) * 54;
-    ctx.fillStyle = UI.beige; rr(x, y, 204, 44, 8); ctx.fill();
-    uiNotch(x, y, 8);
+    uiTicket(x, y, 204, 44, UI.paperLight, 5);
     T(ic, x + 26, y + 23, 22, '#fff', 'center', '400');
     T(label, x + 48, y + 23, 17, UI.ink, 'left', '800');
-    ctx.fillStyle = UI.beigeDark; rr(x + 144, y + 6, 52, 32, 6); ctx.fill();
+    ctx.fillStyle = UI.paperDark; rr(x + 144, y + 6, 52, 32, 16); ctx.fill();
     T(String(n), x + 170, y + 23, 22, UI.ink, 'center', '900');
   });
   const ready = overAge >= 0.8;
@@ -1567,14 +1593,14 @@ function drawOver() {
 }
 
 function drawPause() {
-  ctx.fillStyle = 'rgba(4,6,10,.86)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(10,12,34,.86)'; ctx.fillRect(0, 0, W, H);
   uiPanel(70, 300, 400, 330, 24);
   uiTitleBar(W / 2, 282, 240, '暫停中', 24);
-  if (!touchMode) T('按 Esc 或 Space 繼續', W / 2, 372, 14, UI.dim);
+  if (!touchMode) T('按 Esc 或 Space 繼續', W / 2, 372, 14, UI.inkSoft);
   uiButton(L.btnResume, '繼續', 'primary', 'RESUME', true);
   uiButton(L.btnRestart, '重新開始', 'beige', 'RESTART');
   uiButton(L.btnQuit, '回標題', 'beige', 'HOME');
-  uiDiamondX(W / 2, 630);
+  uiCloseX(W / 2, 630);
 }
 
 function drawScene() {
