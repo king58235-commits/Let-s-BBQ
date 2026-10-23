@@ -1,0 +1,1614 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>中秋海邊烤肉攤</title>
+<meta name="theme-color" content="#0b1230">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='52' font-size='52'%3E🌕%3C/text%3E%3C/svg%3E">
+<style>
+html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;background:#0b1230}
+/* 桌機寬螢幕：兩側用夜景放大壓暗，不留一大片純色 */
+body{box-sizing:border-box;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;display:flex;align-items:center;justify-content:center;background:linear-gradient(rgba(5,8,24,.7),rgba(5,8,24,.92)),url(assets/bg_scene.jpg) center/cover no-repeat,#0b1230}
+canvas{display:block;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;box-shadow:0 0 48px rgba(0,0,0,.65)}
+/* 手機橫放：遊戲是直式，橫放會縮成一條細縫，所以蓋一層提示 */
+#rotate{display:none;position:fixed;inset:0;z-index:10;background:rgba(8,12,32,.97);color:#ffe082;flex-direction:column;align-items:center;justify-content:center;font:700 22px/1.7 'Microsoft JhengHei','PingFang TC',system-ui,sans-serif;text-align:center}
+#rotate .ic{font-size:64px;animation:rot 2.2s ease-in-out infinite}
+@keyframes rot{0%,100%{transform:rotate(-90deg)}50%{transform:rotate(0)}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="rotate"><div class="ic">📱</div><div>請將手機轉為直向<br>才能遊玩</div></div>
+<script>
+'use strict';
+/* ============================================================
+ *  中秋海邊烤肉攤 — prototype
+ *  邏輯畫面 540x960，等比縮放置中。滑鼠／觸控共用 pointer 事件。
+ * ============================================================ */
+
+/* ---------- 可調參數（平衡數值都在這裡） ---------- */
+const CFG = {
+  gameSeconds: 90,
+  maxSkewer: 4,            // 一串最多幾個食材
+  grillSlots: 6,
+  customerSlots: 5,        // 隊伍最長可排幾人（上限）
+  // 壓力曲線：依「經過秒數」分段。
+  //   spawn = 補客人的間隔（秒）；cap = 同時在場人數上限；lens = 點單長度（食材個數）的機率權重。
+  //   spawn 與 lens 在相鄰兩段之間線性漸變（不會突然跳級），cap 在進入新階段時才放寬。
+  phases: [
+    { at: 0,  spawn: 9.0, cap: 2, lens: { 2: 1 } },                    // 開局：給新手熟悉操作的緩衝
+    { at: 15, spawn: 7.0, cap: 3, lens: { 2: 0.8, 3: 0.2 } },
+    { at: 35, spawn: 5.0, cap: 4, lens: { 2: 0.35, 3: 0.45, 4: 0.2 } },
+    { at: 58, spawn: 3.5, cap: 5, lens: { 2: 0.1, 3: 0.4, 4: 0.5 } },
+    { at: 78, spawn: 2.4, cap: 5, lens: { 3: 0.3, 4: 0.7 } },          // 最後衝刺
+  ],
+  rushAt: 78,              // 最後衝刺開始的秒數（會有提示與音效）
+  patienceShrink: 0.42,    // 客人耐心隨時間縮短：結束時只剩 58%
+  // 點單越複雜分數倍率越高（超線性：4 個食材要做的事遠超過 2 個食材的 2 倍）
+  orderMult: { 2: 1, 3: 1.7, 4: 2.6 },
+  // 火力：整體烤熟速率倍數（可在遊戲中調整，會記住）
+  fireMin: 0.5, fireMax: 2, fireStep: 0.1,
+  // 烤熟度：t 為「烤架上累積秒數 × 串的平均速度」
+  // 各階段長度：太生 3.7 > 熟了 2.6 > 有點沒熟 1.8 > 完美 1.4，超過完美就一路焦
+  stages: [
+    { name: '太生',     until: 3.7,     score: 0,   color: '#e57373' },
+    { name: '有點沒熟', until: 5.5,     score: 50,  color: '#ffb74d' },
+    { name: '熟了',     until: 8.1,     score: 100, color: '#9ccc65' },
+    { name: '完美',     until: 9.5,     score: 200, color: '#ffd54f' },
+    { name: '焦了',     until: Infinity, score: -50, color: '#78909c' },
+  ],
+  barMax: 12,              // 進度條涵蓋的 t 範圍（9.5 之後都是焦）
+  walkoutPenalty: 30,      // 客人等不及離開扣分
+  wrongPatienceHit: 0.12,  // 送錯餐：扣客人耐心比例
+  tipScore: 20,            // 熟了/完美且耐心 > 50% 的小費
+  streakBonus: 20,         // 連續完美，每多一次加的分
+  // 結算稱號門檻（以機器人實測校準；機器人沒有思考時間，真人通常落在 1.0~1.4 秒/動作 的區間）
+  //   0.45 秒/動作 ≈ 7200 分、0.7 ≈ 5300、1.0 ≈ 2700、1.4 ≈ 800、1.8 ≈ 270
+  ranks: [
+    { min: 0,    name: '新手小學徒',   color: '#b0bec5' },
+    { min: 800,  name: '夜市小幫手',   color: '#81c784' },
+    { min: 2000, name: '海邊烤肉達人', color: '#4fc3f7' },
+    { min: 4500, name: '中秋烤肉之神', color: '#ffd54f' },
+  ],
+};
+
+const INGREDIENTS = [
+  // 色相刻意拉開（紅 / 綠 / 黃 / 紫 / 白粉 / 橘），烤熟後即使偏褐也能靠顏色與剪影分辨。
+  // 一開始的三種是色相差最遠的紅、綠、黃。
+  { id: 'pork',        name: '豬肉',   emoji: '🥩', color: '#d9534f', speed: 1.0, unlockAt: 0  },
+  { id: 'scallion',    name: '青蔥',   emoji: '🌿', color: '#4caf50', speed: 1.5, unlockAt: 0  },
+  { id: 'corn',        name: '玉米',   emoji: '🌽', color: '#f2c230', speed: 0.8, unlockAt: 0  },
+  { id: 'eggplant',    name: '茄子',   emoji: '🍆', color: '#8e5bd0', speed: 0.9, unlockAt: 20 },
+  { id: 'marshmallow', name: '棉花糖', emoji: '🍡', color: '#f4a6c0', speed: 1.8, unlockAt: 40 },
+  { id: 'shrimp',      name: '蝦',     emoji: '🦐', color: '#ff8a65', speed: 1.3, unlockAt: 60 },
+];
+const ING = Object.fromEntries(INGREDIENTS.map(i => [i.id, i]));
+// 客人名單：id 對應 assets/cust_<id>.png；emoji 為還沒有美術時的佔位。名單會依角色企劃增減。
+// scale：個別縮放（預設 1），讓臉畫得比較大／小的角色在畫面上看起來一樣大；用並排校準來調。
+const CUSTOMERS = [
+  { id: 'bear',   emoji: '🐻', scale: 0.95 },
+  { id: 'rabbit', emoji: '🐰', scale: 1.12 },
+  { id: 'cat',    emoji: '🐱', scale: 1.05 },
+  { id: 'fox',    emoji: '🦊', scale: 1 },
+  { id: 'panda',  emoji: '🐼', scale: 0.92 },
+  { id: 'wolf',   emoji: '🐺', scale: 1 },       // 校準基準
+  { id: 'tiger',  emoji: '🐯', scale: 0.85 },
+  { id: 'sheep',  emoji: '🐑', scale: 1.1 },
+];
+const CUST_BY_ID = Object.fromEntries(CUSTOMERS.map(c => [c.id, c]));
+
+/* ---------- 美術替換點 ----------
+ * 之後有圖就填進來，沒填的項目會自動用色塊＋emoji。
+ * key 規則：ing_<食材id>   例：'ing_pork': 'assets/ing_pork.png'
+ */
+const ART_FILES = {
+  ing_pork: 'assets/ing_pork.png',
+  ing_scallion: 'assets/ing_scallion.png',
+  ing_eggplant: 'assets/ing_eggplant.png',
+  ing_corn: 'assets/ing_corn.png',
+  ing_marshmallow: 'assets/ing_marshmallow.png',
+  ing_shrimp: 'assets/ing_shrimp.png',
+  cust_bear: 'assets/cust_bear.png',
+  cust_rabbit: 'assets/cust_rabbit.png',
+  cust_cat: 'assets/cust_cat.png',
+  cust_fox: 'assets/cust_fox.png',
+  cust_sheep: 'assets/cust_sheep.png',
+  cust_panda: 'assets/cust_panda.png',
+  cust_wolf: 'assets/cust_wolf.png',
+  cust_tiger: 'assets/cust_tiger.png',
+  bg_scene: 'assets/bg_scene.jpg',
+  icon_trash: 'assets/icon_trash.png',
+  grate: 'assets/grate.jpg',
+};
+const ASSET_VER = '20261023190940';   // ← process_assets.py 每次輸出新圖時會自動改這個值
+const ART = {};
+const artTotal = Object.keys(ART_FILES).length;
+let artDone = 0;                                   // 載入完成（含失敗）的張數
+const artStart = performance.now();
+// 全部載入完才讓玩家開始，避免先閃一下 emoji 佔位圖；載太久（8 秒）就放行，缺的圖會用佔位圖
+const artLoaded = () => artDone >= artTotal || performance.now() - artStart > 8000;
+for (const k in ART_FILES) {
+  const im = new Image();
+  im.onload = im.onerror = () => { artDone++; };
+  im.src = ART_FILES[k] + '?v=' + ASSET_VER;   // 版本號由 tools/process_assets.py 自動更新，換圖後瀏覽器不會繼續用舊圖
+  ART[k] = im;
+}
+
+/* ---------- 版面 ---------- */
+const W = 540, H = 960;
+// 客人排隊：站在櫃台後面由左到右排成一列（第 0 位在最左邊），新客人從右側走進來。
+// 立繪下緣被櫃台（counterY）遮住；奇數位置稍微低一點，看起來比較像擠在一起的隊伍。
+// artW：處理後立繪的「基準寬度」(480px) 在畫面上顯示成 drawW 像素，高度同比例（約 179px）
+const QUEUE = { x0: 78, step: 96, drawW: 148, artW: 480, counterY: 312, headTop: 130 };
+const L = {
+  qx: i => QUEUE.x0 + i * QUEUE.step,
+  cust: i => ({ x: L.qx(i) - QUEUE.step / 2, y: 48, w: QUEUE.step, h: 264 }),   // 含頭上氣泡的高度，點氣泡也算點到客人
+  slot: i => ({ x: 24 + (i % 3) * 168, y: 325 + Math.floor(i / 3) * 158, w: 156, h: 146 }),
+  asm:   { x: 24,  y: 655, w: 260, h: 95 },
+  undo:  { x: 290, y: 655, w: 50,  h: 95 },
+  place: { x: 346, y: 655, w: 86,  h: 95 },
+  trash: { x: 440, y: 655, w: 76,  h: 95 },
+  tray: i => ({ x: 18 + i * 86, y: 790, w: 76, h: 110 }),
+  fireMinus: { x: 150, y: 908, w: 44, h: 34 },
+  fireLabel: { x: 198, y: 908, w: 144, h: 34 },
+  firePlus:  { x: 346, y: 908, w: 44, h: 34 },
+  pause:      { x: 8,   y: 9,   w: 34,  h: 34 },
+  btnStart:   { x: 110, y: 744, w: 320, h: 66 },   // 標題
+  btnAgain:   { x: 90,  y: 626, w: 360, h: 66 },   // 結算
+  btnHome:    { x: 90,  y: 704, w: 360, h: 48 },
+  btnResume:  { x: 100, y: 400, w: 340, h: 64 },   // 暫停
+  btnRestart: { x: 100, y: 480, w: 340, h: 52 },
+  btnQuit:    { x: 100, y: 548, w: 340, h: 52 },
+  sndSfx:     { x: 12,  y: 908, w: 40,  h: 34 },   // 音效開關
+  sndMus:     { x: 56,  y: 908, w: 40,  h: 34 },   // 音樂開關
+  sndVib:     { x: 100, y: 908, w: 40,  h: 34 },   // 震動開關（裝置不支援時不顯示）
+  pauseX:     { x: 244, y: 604, w: 52,  h: 52 },   // 暫停對話框下緣的菱形 X（等於「繼續」）
+};
+const FONT = "'Microsoft JhengHei','PingFang TC','Noto Sans TC',system-ui,'Segoe UI Emoji','Apple Color Emoji',sans-serif";
+
+/* ---------- 畫布 / 縮放 ---------- */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let scale = 1;
+const rotEl = document.getElementById('rotate');
+const coarse = (() => { try { return matchMedia('(pointer: coarse)').matches; } catch (e) { return false; } })();
+let rotateHint = false;
+function resize() {
+  // 扣掉瀏海／手勢條：body 的 padding 就是 env(safe-area-inset-*)，桌機上是 0
+  const cs = getComputedStyle(document.body);
+  const availW = innerWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  const availH = innerHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+  scale = Math.min(availW / W, availH / H);
+  rotateHint = coarse && innerWidth > innerHeight * 1.15 && innerHeight < 520;   // 手機橫放
+  rotEl.style.display = rotateHint ? 'flex' : 'none';
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = W * scale + 'px';
+  canvas.style.height = H * scale + 'px';
+  canvas.width = Math.round(W * scale * dpr);
+  canvas.height = Math.round(H * scale * dpr);
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+}
+addEventListener('resize', resize);
+if (window.visualViewport) visualViewport.addEventListener('resize', resize);   // 手機網址列收合時
+resize();
+
+/* ---------- 狀態 ---------- */
+let state = 'title';   // title | playing | over
+let G = null;
+let clock = 0;
+let overAge = 0;       // 結算畫面已經過幾秒（用於數字跳動與防誤觸）
+let paused = false;
+let touchMode = coarse; // 最後一次輸入是觸控 → 隱藏鍵盤提示
+let best = 0;
+let fire = 1;          // 火力倍數
+try { best = +localStorage.getItem('bbq_best') || 0; } catch (e) {}
+try { const f = +localStorage.getItem('bbq_fire'); if (f >= CFG.fireMin && f <= CFG.fireMax) fire = f; } catch (e) {}
+function setFire(v) {
+  fire = Math.round(Math.max(CFG.fireMin, Math.min(CFG.fireMax, v)) * 10) / 10;
+  try { localStorage.setItem('bbq_fire', fire); } catch (e) {}
+}
+const stars = Array.from({ length: 45 }, () => ({ x: Math.random() * W, y: Math.random() * 230, p: Math.random() * 6 }));
+
+const rand = n => Math.floor(Math.random() * n);
+const lerp = (a, b, t) => a + (b - a) * Math.max(0, Math.min(1, t));
+const elapsed = () => CFG.gameSeconds - G.timeLeft;
+const isUnlocked = i => elapsed() >= INGREDIENTS[i].unlockAt;
+
+function stageOf(t) {
+  for (let i = 0; i < CFG.stages.length; i++) if (t < CFG.stages[i].until) return i;
+  return CFG.stages.length - 1;
+}
+
+function newGame() {
+  G = {
+    timeLeft: CFG.gameSeconds, score: 0,
+    assembly: [], grill: Array(CFG.grillSlots).fill(null),
+    held: null,                       // { sk, from }
+    customers: [],                    // 排隊順序，index 0 在最前面（最左邊）
+    spawnTimer: 0.5, spawnCount: 0,
+    popups: [], msg: null, streak: 0,
+    unlocked: INGREDIENTS.map(i => i.unlockAt === 0),
+    rushed: false,                    // 是否已經宣告「最後衝刺」
+    shown: 0, asmT: -9,               // shown：HUD 顯示的分數（會滾動追上 score）；asmT：最後一次加食材的時間（彈跳動畫）
+    newBadge: INGREDIENTS.map(() => 0),   // 剛解鎖的食材：托盤上顯示幾秒鐘的紅色提示
+    stats: { perfect: 0, good: 0, meh: 0, bad: 0, wrong: 0, walkout: 0 },
+  };
+}
+
+function startGame() { newGame(); FX.clear(); state = 'playing'; paused = false; Sound.play('start'); }
+function goTitle() { state = 'title'; G = null; paused = false; }
+function rankOf(sc) {
+  let idx = 0;
+  CFG.ranks.forEach((r, i) => { if (sc >= r.min) idx = i; });
+  return { ...CFG.ranks[idx], idx };
+}
+
+function endGame() {
+  state = 'over';
+  overAge = 0;
+  paused = false;
+  G.held = null;
+  G.score = Math.max(0, G.score);
+  G.newBest = G.score > best;
+  Sound.play('over'); if (G.newBest) Sound.play('record');
+  if (G.newBest) {                                              // 新紀錄：從上方灑彩帶
+    for (let k = 0; k < 4; k++) FX.emit(14, { x: 90 + k * 120, y: 70, angle: Math.PI / 2, arc: 1.6, speed: 150, life: 2.2, size: 8, color: ['#ffd54f', '#ff8a65', '#c900df', '#19e3a0', '#fff'], kind: 'spark', g: 160, drag: 0.4 });
+  }
+  if (G.newBest) { best = G.score; try { localStorage.setItem('bbq_best', best); } catch (e) {} }
+}
+
+/* ---------- 震動（行動裝置；iOS Safari 沒有這個 API，就整組停用） ---------- */
+const Haptic = (() => {
+  const can = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
+  let on = true;
+  try { on = localStorage.getItem('bbq_haptic') !== '0'; } catch (e) {}
+  // 名稱和 Sound 的音效名稱一致，Sound.play() 時會順便觸發；數字是毫秒，陣列是「震、停、震…」
+  const P = { add: 6, place: 12, pickup: 6, trash: 14, perfect: [18, 40, 18], good: 14, meh: 10, bad: 50, wrong: [40, 30, 40],
+    burnt: 30, walkout: 70, arrive: 8, ready: 8, unlock: [10, 30, 10], over: [60, 40, 90], record: [30, 30, 30, 30, 60],
+    rush: [30, 40, 30, 40, 60], pause: 8, resume: 8, tick: 6, deny: 20 };
+  return {
+    get can() { return can; }, get on() { return on; },
+    pulse(name) { if (!can || !on || !(name in P)) return; try { navigator.vibrate(P[name]); } catch (e) {} },
+    toggle() { on = !on; try { localStorage.setItem('bbq_haptic', on ? '1' : '0'); } catch (e) {} if (on) this.pulse('perfect'); },
+  };
+})();
+
+/* ---------- 特效：粒子、畫面輕震、分數跳動 ---------- */
+const FX = {
+  list: [], shake: 0, bump: 0,
+  // o: { x, y, spread, angle(不給就全方向), arc, speed, g(重力), drag, life, size, grow, color(可為陣列), kind: dot|spark|smoke|ring }
+  emit(n, o) {
+    for (let i = 0; i < n; i++) {
+      const a = (o.angle != null ? o.angle : Math.random() * Math.PI * 2) + (Math.random() - 0.5) * (o.arc || 0);
+      const sp = (o.speed || 0) * (0.5 + Math.random() * 0.8);
+      const life = (o.life || 0.7) * (0.7 + Math.random() * 0.6);
+      this.list.push({
+        x: o.x + (Math.random() - 0.5) * (o.spread || 0), y: o.y + (Math.random() - 0.5) * (o.spread || 0),
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: o.g || 0, drag: o.drag || 0,
+        life, max: life, size: (o.size || 4) * (0.7 + Math.random() * 0.6), grow: o.grow || 0,
+        color: Array.isArray(o.color) ? o.color[rand(o.color.length)] : (o.color || '#fff'),
+        kind: o.kind || 'dot', rot: Math.random() * 6.28, vrot: (Math.random() - 0.5) * 10,
+      });
+    }
+    if (this.list.length > 400) this.list.splice(0, this.list.length - 400);   // 上限：避免低階手機被拖慢
+  },
+  update(dt) {
+    for (const p of this.list) {
+      p.life -= dt; p.vy += p.g * dt;
+      if (p.drag) { const k = Math.max(0, 1 - p.drag * dt); p.vx *= k; p.vy *= k; }
+      p.x += p.vx * dt; p.y += p.vy * dt; p.size += p.grow * dt; p.rot += p.vrot * dt;
+    }
+    this.list = this.list.filter(p => p.life > 0);
+    if (this.shake > 0) this.shake = Math.max(0, this.shake - dt);
+    if (this.bump > 0) this.bump = Math.max(0, this.bump - dt);
+  },
+  draw() {
+    for (const p of this.list) {
+      const t = p.life / p.max;
+      ctx.globalAlpha = p.kind === 'smoke' ? 0.5 * t : Math.min(1, t * 1.6);
+      ctx.fillStyle = p.color; ctx.strokeStyle = p.color;
+      if (p.kind === 'spark') {                                   // 四角星
+        const sz = p.size * (0.6 + 0.4 * t);
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+        ctx.beginPath();
+        for (let k = 0; k < 8; k++) { const r = k % 2 ? sz * 0.28 : sz, an = k * Math.PI / 4; ctx.lineTo(Math.cos(an) * r, Math.sin(an) * r); }
+        ctx.closePath(); ctx.fill(); ctx.restore();
+      } else if (p.kind === 'ring') {
+        ctx.lineWidth = 3 * t + 0.5; ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.stroke();
+      } else {
+        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(0.5, p.size), 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  },
+  clear() { this.list = []; this.shake = 0; this.bump = 0; },
+};
+
+// 交餐的特效：完美＝金色火花與光環（連擊越高越華麗）、熟了＝綠色火花、沒熟＝灰點、生／焦＝黑煙加輕震
+function fxServe(c, st, streak) {
+  const x = c.x, y = QUEUE.headTop + 50;
+  if (st === 3) {
+    FX.emit(18, { x, y, speed: 230, life: 0.8, size: 9, color: ['#ffd54f', '#fff3c4', '#ffb300'], kind: 'spark', g: 220, drag: 1.2 });
+    FX.emit(1, { x, y, kind: 'ring', size: 8, grow: 120, life: 0.45, color: '#ffe082' });
+    if (streak >= 3) FX.emit(10, { x, y: y - 20, angle: -Math.PI / 2, arc: 1.2, speed: 160, life: 1.0, size: 7, color: ['#ff8a65', '#ffd54f'], kind: 'spark', g: 120 });
+  } else if (st === 2) {
+    FX.emit(10, { x, y, speed: 150, life: 0.6, size: 6, color: ['#9ccc65', '#e6ee9c'], kind: 'spark', g: 160, drag: 1 });
+  } else if (st === 1) {
+    FX.emit(5, { x, y, speed: 70, life: 0.6, size: 4, color: '#cfd8dc', g: 120 });
+  } else {
+    FX.emit(7, { x, y, speed: 60, life: 0.9, size: 9, grow: 18, color: '#455a64', kind: 'smoke', g: -40 });
+    FX.shake = 0.18;
+  }
+}
+
+/* ---------- 音效（Web Audio 即時合成，沒有任何音檔） ---------- */
+const Sound = (() => {
+  let ac = null, master, sfxBus, musBus, musMode, delay, noiseBuf, sizzleG, deadBus;
+  let sfxOn = true, musOn = true;
+  // 保護：同時發聲的音效不超過 MAX_SFX_VOICES 個（狂點按鈕也不會疊到爆音）；同名音效有最小間隔
+  const MAX_SFX_VOICES = 32;
+  let active = 0, testMode = false;
+  const lastAt = {};
+  const MIN_GAP = { add: 25, tick: 200, ui: 35, deny: 150, pickup: 35, drop: 35, undo: 35, place: 60, trash: 60, wrong: 120, arrive: 150, burnt: 120, ready: 120, walkout: 150, pause: 100, resume: 100 };
+  try { sfxOn = localStorage.getItem('bbq_sfx') !== '0'; musOn = localStorage.getItem('bbq_music') !== '0'; } catch (e) {}
+  // C 大調五聲音階（中秋的味道）：旋律、串食材、交餐的音都從這裡取，所以怎麼疊都不會不協和
+  const PENTA = [261.63, 293.66, 329.63, 392.0, 440.0, 523.25, 587.33, 659.25, 783.99, 880.0, 1046.5, 1174.66, 1318.5];
+  const note = i => PENTA[Math.max(0, Math.min(PENTA.length - 1, i))];
+  const BASSF = [130.81, 110.0, 98.0, 146.83];       // 低音：C A G D，一小節換一個
+  const MODE_VOL = { title: 0.8, play: 0.9, pause: 0.3, over: 0.6 };
+  let mode = 'title', lastSizzle = 0, nextT = 0, step = 0, mel = 6;
+
+  function init() {
+    if (ac) return ac;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor();     // 壓縮器：同時很多音效也不會爆音
+    comp.threshold.value = -14; comp.ratio.value = 6; comp.attack.value = 0.003; comp.release.value = 0.2;
+    master = ac.createGain(); master.gain.value = window.__manualSim ? 0 : 0.85;   // 自動化測試時整個靜音，不要打擾喇叭
+    master.connect(comp); comp.connect(ac.destination);
+    sfxBus = ac.createGain(); sfxBus.gain.value = sfxOn ? 1 : 0; sfxBus.connect(master);
+    deadBus = ac.createGain(); deadBus.gain.value = 0; deadBus.connect(master);      // 「測試用」的假出口：Sound.test() 走這裡，完全無聲
+    musMode = ac.createGain(); musMode.gain.value = MODE_VOL[mode]; musMode.connect(master);
+    musBus = ac.createGain(); musBus.gain.value = musOn ? 0.5 : 0; musBus.connect(musMode);
+    delay = ac.createDelay(1); delay.delayTime.value = 0.3;                  // 回音
+    const fb = ac.createGain(); fb.gain.value = 0.28;
+    const wet = ac.createGain(); wet.gain.value = 0.35;
+    delay.connect(fb); fb.connect(delay); delay.connect(wet); wet.connect(musBus);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    // 烤肉滋滋聲（音量隨烤架上的串數變化）
+    const sz = ac.createBufferSource(); sz.buffer = noiseBuf; sz.loop = true;
+    const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 4200; bp.Q.value = 0.7;
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1800;
+    sizzleG = ac.createGain(); sizzleG.gain.value = 0;
+    sz.connect(bp); bp.connect(hp); hp.connect(sizzleG); sizzleG.connect(sfxBus); sz.start();
+    // 海浪聲（慢慢起伏的低頻雜訊，歸在音樂開關）
+    const wv = ac.createBufferSource(); wv.buffer = noiseBuf; wv.loop = true;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 520;
+    const wg = ac.createGain(); wg.gain.value = 0.05;
+    const lfo = ac.createOscillator(); lfo.frequency.value = 0.11;
+    const lg = ac.createGain(); lg.gain.value = 0.035;
+    lfo.connect(lg); lg.connect(wg.gain);
+    wv.connect(lp); lp.connect(wg); wg.connect(musBus); wv.start(); lfo.start();
+    setInterval(schedule, 90);
+    return ac;
+  }
+
+  function unlock() { init(); if (ac && ac.state === 'suspended') ac.resume(); }
+
+  // o: { f, f2(滑音終點), type, t(延遲秒), dur, vol, a(起音秒), bus, send(回音量) }
+  function tone(o) {
+    if (!ac) return;
+    const sfxVoice = !o.bus;                                  // 音樂（有指定 bus）不受上限限制
+    if (sfxVoice && active >= MAX_SFX_VOICES) return;
+    const t0 = ac.currentTime + Math.max(0, o.t || 0), a = o.a == null ? 0.005 : o.a, dur = o.dur == null ? 0.15 : o.dur;
+    const osc = ac.createOscillator(), g = ac.createGain();
+    osc.type = o.type || 'sine';
+    osc.frequency.setValueAtTime(o.f, t0);
+    if (o.f2) osc.frequency.exponentialRampToValueAtTime(o.f2, t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(o.vol == null ? 0.2 : o.vol, t0 + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g); g.connect(testMode ? deadBus : (o.bus || sfxBus));
+    if (o.send && !testMode) { const sg = ac.createGain(); sg.gain.value = o.send; g.connect(sg); sg.connect(delay); }
+    if (sfxVoice) { active++; osc.onended = () => { active--; }; }
+    osc.start(t0); osc.stop(t0 + dur + 0.05);
+  }
+  // o: { t, dur, vol, type(濾波種類), f, f2, q, a, bus }
+  function noise(o) {
+    if (!ac) return;
+    const sfxVoice = !o.bus;
+    if (sfxVoice && active >= MAX_SFX_VOICES) return;
+    const t0 = ac.currentTime + Math.max(0, o.t || 0), a = o.a == null ? 0.004 : o.a, dur = o.dur == null ? 0.2 : o.dur;
+    const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+    const flt = ac.createBiquadFilter(); flt.type = o.type || 'bandpass';
+    flt.frequency.setValueAtTime(o.f || 2000, t0);
+    if (o.f2) flt.frequency.exponentialRampToValueAtTime(o.f2, t0 + dur);
+    flt.Q.value = o.q == null ? 1 : o.q;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(o.vol == null ? 0.15 : o.vol, t0 + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(flt); flt.connect(g); g.connect(testMode ? deadBus : (o.bus || sfxBus));
+    if (sfxVoice) { active++; src.onended = () => { active--; }; }
+    src.start(t0, Math.random() * 1.5); src.stop(t0 + dur + 0.05);
+  }
+
+  const S = {
+    ui:      () => tone({ f: 740, f2: 520, type: 'triangle', dur: 0.07, vol: 0.12 }),
+    deny:    () => tone({ f: 200, f2: 150, type: 'square', dur: 0.1, vol: 0.12 }),
+    add:     n => { tone({ f: note(3 + n), type: 'triangle', dur: 0.16, vol: 0.2, send: 0.15 }); noise({ dur: 0.03, vol: 0.05, type: 'highpass', f: 5000 }); },
+    undo:    () => tone({ f: 520, f2: 330, type: 'triangle', dur: 0.1, vol: 0.12 }),
+    pickup:  () => tone({ f: 420, f2: 640, type: 'triangle', dur: 0.08, vol: 0.12 }),
+    drop:    () => tone({ f: 520, f2: 380, type: 'triangle', dur: 0.08, vol: 0.1 }),
+    place:   () => { noise({ dur: 0.55, vol: 0.15, type: 'bandpass', f: 5200, f2: 2200, q: 0.8, a: 0.01 }); tone({ f: 140, f2: 60, dur: 0.12, vol: 0.17 }); },
+    trash:   () => { noise({ dur: 0.18, vol: 0.18, type: 'lowpass', f: 1400, f2: 300, q: 0.6 }); tone({ f: 300, f2: 90, type: 'triangle', dur: 0.2, vol: 0.14 }); },
+    perfect: streak => {                                          // 上行琶音，連擊越高整串音越高
+      const b = 5 + Math.min(4, Math.max(0, (streak || 1) - 1));
+      [0, 2, 4, 7].forEach((d, k) => tone({ f: note(b + d), type: 'triangle', t: k * 0.07, dur: 0.34, vol: 0.2, send: 0.3 }));
+      noise({ t: 0.2, dur: 0.35, vol: 0.05, type: 'highpass', f: 6500 });
+    },
+    good:    () => { tone({ f: note(5), type: 'triangle', dur: 0.2, vol: 0.2, send: 0.2 }); tone({ f: note(7), type: 'triangle', t: 0.09, dur: 0.28, vol: 0.2, send: 0.2 }); },
+    meh:     () => tone({ f: note(4), f2: note(3), type: 'triangle', dur: 0.26, vol: 0.18 }),
+    bad:     () => { tone({ f: 230, f2: 120, type: 'sawtooth', dur: 0.32, vol: 0.1 }); tone({ f: 190, f2: 90, type: 'sawtooth', t: 0.14, dur: 0.34, vol: 0.1 }); },
+    wrong:   () => { tone({ f: 150, type: 'square', dur: 0.12, vol: 0.13 }); tone({ f: 130, type: 'square', t: 0.15, dur: 0.18, vol: 0.13 }); },
+    arrive:  () => { tone({ f: 880, type: 'sine', dur: 0.55, vol: 0.12, a: 0.003, send: 0.2 }); tone({ f: 1760, type: 'sine', dur: 0.35, vol: 0.04 }); tone({ f: 659, type: 'sine', t: 0.13, dur: 0.6, vol: 0.1, send: 0.2 }); },
+    walkout: () => tone({ f: 420, f2: 170, type: 'sawtooth', dur: 0.45, vol: 0.11 }),
+    burnt:   () => { for (let i = 0; i < 7; i++) noise({ t: i * 0.045 + Math.random() * 0.02, dur: 0.03, vol: 0.14, type: 'highpass', f: 2500 }); noise({ dur: 0.5, vol: 0.06, type: 'lowpass', f: 900, f2: 300 }); },
+    ready:   () => { tone({ f: note(9), type: 'sine', dur: 0.18, vol: 0.09 }); tone({ f: note(10), type: 'sine', t: 0.09, dur: 0.22, vol: 0.08 }); },
+    tick:    () => tone({ f: 1000, type: 'square', dur: 0.05, vol: 0.13 }),
+    rush:    () => { tone({ f: 300, f2: 900, type: 'sawtooth', dur: 0.5, vol: 0.09 }); noise({ dur: 0.5, vol: 0.1, type: 'bandpass', f: 500, f2: 3500, q: 0.8, a: 0.05 }); },
+    unlock:  () => [4, 6, 9].forEach((d, k) => tone({ f: note(d), type: 'triangle', t: k * 0.09, dur: 0.3, vol: 0.18, send: 0.3 })),
+    pause:   () => tone({ f: 600, f2: 300, type: 'triangle', dur: 0.12, vol: 0.12 }),
+    resume:  () => tone({ f: 300, f2: 600, type: 'triangle', dur: 0.12, vol: 0.12 }),
+    start:   () => { noise({ dur: 0.4, vol: 0.12, type: 'bandpass', f: 400, f2: 3000, q: 0.8, a: 0.05 }); [0, 4, 5].forEach((d, k) => tone({ f: note(d + 2), type: 'triangle', t: 0.1 + k * 0.08, dur: 0.3, vol: 0.16, send: 0.2 })); },
+    over:    () => { [5, 7, 8, 10].forEach((d, k) => tone({ f: note(d), type: 'triangle', t: k * 0.12, dur: 0.3, vol: 0.2, send: 0.3 })); tone({ f: note(12), type: 'sine', t: 0.5, dur: 1.0, vol: 0.18, send: 0.4 }); },
+    record:  () => [9, 10, 11, 12].forEach((d, k) => tone({ f: note(d), type: 'sine', t: 0.9 + k * 0.08, dur: 0.4, vol: 0.12, send: 0.4 })),
+  };
+
+  function play(name, arg) {
+    if (window.__manualSim) return;           // 自動化測試：不發聲也不震動（測試把一整局壓縮在幾十毫秒，音效會同時全部起跳）
+    Haptic.pulse(name);                       // 震動與音效同名，而且各自有開關
+    if (!ac || !sfxOn || ac.state !== 'running') return;
+    const now = performance.now(), gap = MIN_GAP[name] || 40;
+    if (now - (lastAt[name] || -1e9) < gap) return;   // 同名音效太密就略過（狂點時不會變成機關槍）
+    lastAt[name] = now;
+    try { S[name](arg); } catch (e) {}
+  }
+
+  // 背景音樂：五聲音階的隨機漫步旋律 + 低音 + 輕微節奏；最後 20 秒逐漸加快
+  function bpm() {
+    if (mode === 'title') return 84;
+    if (mode === 'over') return 78;
+    const tl = (typeof G === 'object' && G && state === 'playing') ? G.timeLeft : 90;
+    return 100 + (tl <= 20 ? (20 - tl) / 20 * 26 : 0);
+  }
+  function schedule() {
+    if (!ac || ac.state !== 'running' || !musOn) { nextT = 0; return; }
+    const eighth = 60 / bpm() / 2;
+    if (nextT < ac.currentTime) nextT = ac.currentTime + 0.05;
+    while (nextT < ac.currentTime + 0.35) { musicStep(nextT - ac.currentTime, eighth); nextT += eighth; step++; }
+  }
+  const RHYTHM = [1, 0, 1, 1, 0, 1, 0, 1];
+  function musicStep(t, eighth) {
+    const k = step % 8, bar = (step >> 3) % 4;
+    if (k === 0) {
+      tone({ f: BASSF[bar], type: 'triangle', t, dur: eighth * 7, vol: 0.12, a: 0.03, bus: musBus });
+      tone({ f: BASSF[bar] * 2, type: 'sine', t, dur: eighth * 7, vol: 0.04, a: 0.06, bus: musBus });
+    }
+    if (RHYTHM[k] && Math.random() < (mode === 'title' ? 0.75 : 0.88)) {
+      mel = Math.max(3, Math.min(10, mel + [-2, -1, -1, 0, 1, 1, 2][rand(7)]));
+      tone({ f: note(mel), type: 'triangle', t, dur: eighth * 2.4, vol: 0.09, a: 0.004, bus: musBus, send: 0.35 });
+      tone({ f: note(mel) * 2, type: 'sine', t, dur: eighth * 1.2, vol: 0.02, a: 0.004, bus: musBus });
+    }
+    if (mode === 'play' && k % 4 === 2) noise({ t, dur: 0.03, vol: 0.022, type: 'highpass', f: 7000, bus: musBus });
+  }
+
+  // 每個影格呼叫：依遊戲狀態調整音樂音量與滋滋聲
+  function tick() {
+    if (!ac) return;
+    const m = state === 'title' ? 'title' : state === 'over' ? 'over' : paused ? 'pause' : 'play';
+    if (m !== mode) { mode = m; musMode.gain.setTargetAtTime(MODE_VOL[m], ac.currentTime, 0.15); }
+    const cook = (state === 'playing' && !paused && !rotateHint && G) ? G.grill.filter(Boolean).length : 0;
+    const target = Math.min(0.045, cook * 0.0075 * (0.6 + 0.4 * fire));   // 白噪音很響，所以係數要小：6 串約和音樂同一個量級
+    if (Math.abs(target - lastSizzle) > 0.002) { sizzleG.gain.setTargetAtTime(target, ac.currentTime, 0.12); lastSizzle = target; }
+  }
+
+  function apply() {
+    if (!ac) return;
+    sfxBus.gain.setTargetAtTime(sfxOn ? 1 : 0, ac.currentTime, 0.05);
+    musBus.gain.setTargetAtTime(musOn ? 0.5 : 0, ac.currentTime, 0.05);
+  }
+  function save() { try { localStorage.setItem('bbq_sfx', sfxOn ? '1' : '0'); localStorage.setItem('bbq_music', musOn ? '1' : '0'); } catch (e) {} }
+
+  return {
+    unlock, play, tick,
+    get sfx() { return sfxOn; }, get music() { return musOn; }, get voices() { return active; },
+    toggleSfx() { sfxOn = !sfxOn; apply(); save(); if (sfxOn) { unlock(); play('ui'); } },
+    toggleMusic() { musOn = !musOn; apply(); save(); unlock(); },
+    toggleMute() { const on = !(sfxOn || musOn); sfxOn = musOn = on; apply(); save(); unlock(); if (on) play('ui'); },
+    // 開發用：逐一觸發每個音效，回傳有丟出例外的（play() 會吞掉例外，所以測試要走這裡）
+    test() {                                  // 逐一觸發每個音效檢查會不會丟例外；走「假出口」，所以不會出聲
+      const errs = []; testMode = true;
+      try { Object.keys(S).forEach(k => { try { S[k](3); } catch (e) { errs.push(k + ': ' + e.message); } }); } finally { testMode = false; }
+      return { state: ac && ac.state, errs };
+    },
+    suspend() { if (ac && ac.state === 'running') ac.suspend(); },
+    resume() { if (ac && ac.state === 'suspended') ac.resume(); },
+  };
+})();
+
+/* ---------- 遊戲邏輯 ---------- */
+function popup(text, x, y, color = '#fff') { G.popups.push({ text, x, y, color, life: 1.1, max: 1.1 }); }
+function say(text) { G.msg = { text, t: 1.6 }; }
+
+function makeSkewer(items) {
+  const speed = items.reduce((s, id) => s + ING[id].speed, 0) / items.length;
+  return { items: items.slice(), t: 0, speed, born: clock };   // born：放上烤架的時間（落下動畫）
+}
+
+// 取得「現在」的壓力曲線：spawn、lens 在兩段之間漸變，cap 取目前所在段
+function curve(e) {
+  const ph = CFG.phases;
+  let i = 0;
+  while (i + 1 < ph.length && e >= ph[i + 1].at) i++;
+  const a = ph[i], b = ph[i + 1];
+  const f = b ? (e - a.at) / (b.at - a.at) : 0;
+  const lens = {};
+  for (const n of [2, 3, 4]) lens[n] = lerp(a.lens[n] || 0, b ? (b.lens[n] || 0) : (a.lens[n] || 0), f);
+  return { spawn: lerp(a.spawn, b ? b.spawn : a.spawn, f), cap: a.cap, lens };
+}
+function pickLen(e) {
+  const w = curve(e).lens;
+  let r = Math.random() * (w[2] + w[3] + w[4]);
+  if ((r -= w[2]) < 0) return 2;
+  if ((r -= w[3]) < 0) return 3;
+  return 4;
+}
+
+function makeOrder() {
+  const e = elapsed();
+  const pool = INGREDIENTS.filter(i => e >= i.unlockAt).map(i => i.id);
+  const len = pickLen(e);
+  const o = [];
+  for (let i = 0; i < len; i++) o.push(pool[rand(pool.length)]);
+  if (new Set(o).size === 1 && pool.length > 1) o[len - 1] = pool.find(x => x !== o[0]);
+  return o;
+}
+
+function customerCap() {
+  return Math.min(curve(elapsed()).cap, CFG.customerSlots);
+}
+
+function spawnCustomer() {
+  // 同一時間不能有兩位客人用同一個角色（含正在離場的）
+  const taken = new Set(G.customers.map(c => c.animal));
+  const pool = CUSTOMERS.filter(d => !taken.has(d.id));
+  if (G.customers.length >= customerCap() || !pool.length) { G.spawnTimer = 0.5; return; }
+  const k = elapsed() / CFG.gameSeconds;
+  const order = makeOrder();
+  const max = (10 + 7 * order.length) * lerp(1, 1 - CFG.patienceShrink, k);   // 越到後面客人越沒耐心
+  G.customers.push({
+    animal: pool[rand(pool.length)].id, order, max, patience: max,
+    age: 0, x: W + 90, arrived: false,        // 從右側畫面外走進來
+    state: 'waiting', shake: 0, mood: '', timer: 0,
+  });
+  G.spawnCount++;
+  G.spawnTimer = G.spawnCount < 2 ? 2.5 : curve(elapsed()).spawn * (0.85 + Math.random() * 0.3);   // ±15% 隨機，來客不要太規律
+}
+
+function update(dt) {
+  FX.update(dt);
+  G.shown += (G.score - G.shown) * Math.min(1, dt * 9);
+  if (Math.abs(G.score - G.shown) < 0.5) G.shown = G.score;
+  const sec0 = Math.ceil(G.timeLeft);
+  G.timeLeft -= dt;
+  if (G.timeLeft <= 0) { G.timeLeft = 0; endGame(); return; }
+  const sec1 = Math.ceil(G.timeLeft);
+  if (sec1 !== sec0 && sec1 <= 5) Sound.play('tick');   // 最後 5 秒每秒一聲
+
+  // 解鎖新食材
+  INGREDIENTS.forEach((ing, i) => {
+    if (!G.unlocked[i] && elapsed() >= ing.unlockAt) {
+      G.unlocked[i] = true;
+      G.newBadge[i] = 10;
+      Sound.play('unlock');
+      { const tr = L.tray(i); FX.emit(16, { x: tr.x + tr.w / 2, y: tr.y + 30, speed: 220, life: 0.7, size: 8, color: [ing.color, '#fff', '#ffd54f'], kind: 'spark', g: 160, drag: 1.2 }); }
+      popup('新食材 ' + ing.emoji + ' ' + ing.name, W / 2, 600, '#ffe082');
+    }
+  });
+
+  G.newBadge.forEach((v, i) => { if (v > 0) G.newBadge[i] = v - dt; });
+  if (!G.rushed && elapsed() >= CFG.rushAt) {
+    G.rushed = true;
+    popup('🔥 最後衝刺！', W / 2, 400, '#ff8a65');
+    Sound.play('rush');
+  }
+
+  // 烤架
+  G.grill.forEach((sk, i) => {
+    if (!sk) return;
+    const before = stageOf(sk.t);
+    sk.t += dt * sk.speed * fire;
+    const after = stageOf(sk.t);
+    const rs = L.slot(i), sx = rs.x + rs.w / 2;
+    if (before < 3 && after === 3) {                               // 進入完美：輕輕「叮」一聲，並迸出一圈火花
+      Sound.play('ready');
+      FX.emit(7, { x: sx, y: rs.y + 46, speed: 90, life: 0.5, size: 6, color: ['#fff3c4', '#ffd54f'], kind: 'spark', g: 60 });
+    }
+    if (before < 4 && after === 4) {
+      popup('焦了！', sx, rs.y + 30, '#ff8a80');
+      Sound.play('burnt');
+      FX.emit(10, { x: sx, y: rs.y + 50, angle: -Math.PI / 2, arc: 1.2, speed: 90, life: 1, size: 9, grow: 16, color: '#37474f', kind: 'smoke', g: -50 });
+      FX.shake = 0.14;
+    }
+    sk.fxT = (sk.fxT || 0) - dt;                                    // 持續的小特效：烤焦冒黑煙、完美閃光、其餘冒蒸氣
+    if (sk.fxT <= 0) {
+      const px = sx + (Math.random() - 0.5) * 70;
+      if (after === 4) { sk.fxT = 0.14; FX.emit(1, { x: px, y: rs.y + 44, angle: -Math.PI / 2, arc: 0.8, speed: 60, life: 1, size: 8, grow: 14, color: '#37474f', kind: 'smoke', g: -50 }); }
+      else if (after === 3) { sk.fxT = 0.22; FX.emit(1, { x: px, y: rs.y + 44, angle: -Math.PI / 2, arc: 0.8, speed: 40, life: 0.5, size: 5, color: ['#fff3c4', '#ffd54f'], kind: 'spark', g: -20 }); }
+      else { sk.fxT = 0.4; FX.emit(1, { x: px, y: rs.y + 40, angle: -Math.PI / 2, arc: 0.8, speed: 35, life: 0.8, size: 5, grow: 8, color: '#eceff1', kind: 'smoke', g: -30 }); }
+    }
+  });
+
+  // 客人
+  G.spawnTimer -= dt;
+  if (G.spawnTimer <= 0) spawnCustomer();
+  G.customers.forEach((c, i) => {
+    c.age += dt;
+    const tx = L.qx(i);                                  // 往自己的排隊位置滑過去（前面的人走了會補位）
+    c.x += (tx - c.x) * Math.min(1, dt * 6);
+    if (!c.arrived && Math.abs(c.x - tx) < 8) { c.arrived = true; Sound.play('arrive'); }
+    if (c.shake > 0) c.shake -= dt;
+    if (c.state === 'waiting') {
+      if (!c.arrived) return;                            // 走到定位才開始點餐、耐心才開始倒數
+      c.patience -= dt;
+      if (c.patience <= 0) {
+        c.state = 'leaving'; c.mood = '💢'; c.timer = 0.9;
+        G.score = Math.max(0, G.score - CFG.walkoutPenalty);
+        G.stats.walkout++; G.streak = 0;
+        popup('-' + CFG.walkoutPenalty + ' 客人走了', c.x, QUEUE.headTop + 40, '#ff8a80');
+        Sound.play('walkout');
+        FX.emit(6, { x: c.x, y: QUEUE.headTop + 30, speed: 120, life: 0.5, size: 4, color: '#ff5252', g: 200 });
+      }
+    } else {
+      c.timer -= dt;
+    }
+  });
+  G.customers = G.customers.filter(c => !(c.state === 'leaving' && c.timer <= 0));
+
+  // 訊息 / 飄字
+  if (G.msg) { G.msg.t -= dt; if (G.msg.t <= 0) G.msg = null; }
+  G.popups.forEach(p => p.life -= dt);
+  G.popups = G.popups.filter(p => p.life > 0);
+}
+
+/* ---------- 操作 ---------- */
+function addIngredient(i) {
+  if (!isUnlocked(i)) { say('還沒解鎖！'); Sound.play('deny'); return; }
+  if (G.assembly.length >= CFG.maxSkewer) { say('一串最多 ' + CFG.maxSkewer + ' 個'); Sound.play('deny'); return; }
+  G.assembly.push(INGREDIENTS[i].id);
+  G.newBadge[i] = 0;
+  G.asmT = clock;
+  Sound.play('add', G.assembly.length - 1);                        // 串得越多音越高
+}
+function undo() { if (G.assembly.length) Sound.play('undo'); G.assembly.pop(); }
+
+function placeAssembly(i) {
+  if (!G.assembly.length) { say('先串食材！'); Sound.play('deny'); return; }
+  if (i == null) i = G.grill.findIndex(s => !s);
+  if (i < 0) { say('烤架滿了！'); Sound.play('deny'); return; }
+  if (G.grill[i]) { say('那格已經有串了'); Sound.play('deny'); return; }
+  G.grill[i] = makeSkewer(G.assembly);
+  G.assembly = [];
+  Sound.play('place');
+  { const rp = L.slot(i); FX.emit(8, { x: rp.x + rp.w / 2, y: rp.y + 60, angle: -Math.PI / 2, arc: 1, speed: 70, life: 0.7, size: 8, grow: 14, color: '#eceff1', kind: 'smoke', g: -30 }); }
+}
+
+function slotAction(i, drop) {
+  if (G.held) {
+    if (!G.grill[i]) { G.grill[i] = G.held.sk; G.grill[i].born = clock; G.held = null; Sound.play('drop'); }
+    else if (drop) cancelHold();
+    else { say('那格已經有串了'); Sound.play('deny'); }
+  } else if (G.grill[i]) {
+    G.held = { sk: G.grill[i], from: i };
+    G.grill[i] = null;
+    Sound.play('pickup');
+  } else if (G.assembly.length) {
+    placeAssembly(i);
+  }
+}
+
+function cancelHold() {
+  if (!G.held) return;
+  let t = G.grill[G.held.from] ? -1 : G.held.from;
+  if (t < 0) t = G.grill.findIndex(s => !s);
+  if (t < 0) { say('烤架滿了！'); Sound.play('deny'); return; }
+  G.grill[t] = G.held.sk;
+  G.grill[t].born = clock;
+  G.held = null;
+  Sound.play('drop');
+}
+
+function trashAction() {
+  if (G.held) {
+    popup('🗑 丟掉了', L.trash.x + L.trash.w / 2, L.trash.y - 10, '#cfd8dc');
+    G.held = null;
+    Sound.play('trash');
+  } else if (G.assembly.length) {
+    G.assembly = [];
+    Sound.play('trash');
+  }
+}
+
+function serve(ci) {
+  const c = G.customers[ci];
+  if (!G.held || !c || c.state !== 'waiting' || !c.arrived) return;
+  const sk = G.held.sk;
+  const cx = c.x, py = QUEUE.headTop + 40;
+  const same = sk.items.length === c.order.length && sk.items.every((id, k) => id === c.order[k]);
+  if (!same) {
+    c.shake = 0.4;
+    c.patience -= c.max * CFG.wrongPatienceHit;
+    G.stats.wrong++;
+    popup('❌ 不是這個！', cx, py, '#ff8a80');
+    Sound.play('wrong');
+    FX.emit(8, { x: cx, y: py, speed: 140, life: 0.5, size: 4, color: '#ff5252', g: 200 });
+    FX.shake = 0.28;
+    return;
+  }
+  const st = stageOf(sk.t);
+  const mult = CFG.orderMult[sk.items.length] || 1;
+  let pts = Math.round(CFG.stages[st].score * mult);
+  let note = CFG.stages[st].name + (mult > 1 ? ' ×' + mult : '');
+  if ((st === 2 || st === 3) && c.patience / c.max > 0.5) { pts += CFG.tipScore; note += ' +小費'; }
+  if (st === 3) {
+    G.streak++;
+    if (G.streak >= 2) { const b = CFG.streakBonus * Math.min(G.streak - 1, 5); pts += b; note += ' 連擊x' + G.streak; }
+    G.stats.perfect++;
+  } else {
+    G.streak = 0;
+    if (st === 2) G.stats.good++; else if (st === 1) G.stats.meh++; else G.stats.bad++;
+  }
+  G.score = Math.max(0, G.score + pts);
+  Sound.play(st === 3 ? 'perfect' : st === 2 ? 'good' : st === 1 ? 'meh' : 'bad', G.streak);
+  fxServe(c, st, G.streak);
+  if (pts > 0) FX.bump = 0.3;
+  c.state = 'leaving';
+  c.timer = 0.9;
+  c.mood = st >= 2 && st <= 3 ? '💖' : st === 1 ? '😐' : '💢';
+  popup((pts >= 0 ? '+' : '') + pts + '  ' + note, cx, py, pts > 0 ? '#ffe082' : '#ff8a80');
+  G.held = null;
+}
+
+/* ---------- 命中判定 ---------- */
+const inR = (r, x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+function hitTest(x, y) {
+  for (let i = 0; i < INGREDIENTS.length; i++) if (inR(L.tray(i), x, y)) return { t: 'ing', i };
+  for (let i = 0; i < CFG.grillSlots; i++) if (inR(L.slot(i), x, y)) return { t: 'slot', i };
+  for (let i = 0; i < G.customers.length; i++) if (inR(L.cust(i), x, y)) return { t: 'cust', i };
+  if (inR(L.trash, x, y)) return { t: 'trash' };
+  if (inR(L.undo, x, y)) return { t: 'undo' };
+  if (inR(L.place, x, y)) return { t: 'place' };
+  return null;
+}
+
+function onTap(x, y, drop) {
+  if (inR(L.sndSfx, x, y)) { Sound.toggleSfx(); return; }
+  if (inR(L.sndMus, x, y)) { Sound.toggleMusic(); return; }
+  if (Haptic.can && inR(L.sndVib, x, y)) { Haptic.toggle(); return; }
+  if (inR(L.fireMinus, x, y)) { setFire(fire - CFG.fireStep); Sound.play('ui'); return; }
+  if (inR(L.firePlus, x, y)) { setFire(fire + CFG.fireStep); Sound.play('ui'); return; }
+  if (state === 'title') { if (artLoaded()) startGame(); return; }
+  if (state === 'over') {
+    if (overAge < 0.8) return;                       // 剛結束先擋一下，避免來不及看就誤觸重來
+    if (inR(L.btnAgain, x, y)) startGame(); else if (inR(L.btnHome, x, y)) { goTitle(); Sound.play('ui'); }
+    return;
+  }
+  if (paused) {
+    if (inR(L.btnResume, x, y) || inR(L.pauseX, x, y)) { paused = false; Sound.play('resume'); }
+    else if (inR(L.btnRestart, x, y)) startGame();
+    else if (inR(L.btnQuit, x, y)) { goTitle(); Sound.play('ui'); }
+    return;
+  }
+  if (inR(L.pause, x, y)) { paused = true; Sound.play('pause'); return; }
+  const h = hitTest(x, y);
+  if (!h) { if (drop) cancelHold(); return; }
+  if (drop && h.t !== 'slot' && h.t !== 'cust' && h.t !== 'trash') { cancelHold(); return; }
+  switch (h.t) {
+    case 'ing': addIngredient(h.i); break;
+    case 'slot': slotAction(h.i, drop); break;
+    case 'cust': serve(h.i); break;
+    case 'trash': trashAction(); break;
+    case 'undo': undo(); break;
+    case 'place': placeAssembly(); break;
+  }
+}
+
+/* ---------- 輸入：pointer（滑鼠＋觸控） ---------- */
+const ptr = { x: 270, y: 600, sx: 0, sy: 0, pending: false };
+function toLogical(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
+}
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  Sound.unlock();                                  // 瀏覽器要求先有使用者操作才能發聲
+  touchMode = e.pointerType === 'touch';
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  const p = toLogical(e);
+  ptr.x = ptr.sx = p.x; ptr.y = ptr.sy = p.y;
+  const wasHeld = !!(G && G.held);
+  onTap(p.x, p.y, false);
+  // 這一下才剛拿起烤串 → 允許「按住拖曳」到目標再放開
+  ptr.pending = state === 'playing' && !wasHeld && !!G.held;
+});
+canvas.addEventListener('pointermove', e => { const p = toLogical(e); ptr.x = p.x; ptr.y = p.y; });
+canvas.addEventListener('pointerup', e => {
+  const p = toLogical(e);
+  if (ptr.pending && state === 'playing' && G.held && Math.hypot(p.x - ptr.sx, p.y - ptr.sy) > 18) onTap(p.x, p.y, true);
+  ptr.pending = false;
+});
+canvas.addEventListener('pointercancel', () => { ptr.pending = false; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ---------- 輸入：鍵盤 ---------- */
+const KEY_ING = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, Digit5: 4, Digit6: 5, Numpad1: 0, Numpad2: 1, Numpad3: 2, Numpad4: 3, Numpad5: 4, Numpad6: 5 };
+const KEY_SLOT = { KeyQ: 0, KeyW: 1, KeyE: 2, KeyA: 3, KeyS: 4, KeyD: 5 };
+const KEY_CUST = { KeyY: 0, KeyU: 1, KeyI: 2, KeyO: 3, KeyP: 4 };   // 對應隊伍由左到右
+function confirmKey() {
+  if (state === 'title') { if (artLoaded()) startGame(); }
+  else if (state === 'over' && overAge >= 0.8) startGame();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { if (state === 'playing') paused = true; Sound.suspend(); }   // 切到別的視窗：暫停並靜音
+  else Sound.resume();
+});   // 切到別的視窗自動暫停
+addEventListener('keydown', e => {
+  const c = e.code;
+  Sound.unlock();
+  touchMode = false;
+  if (c === 'KeyM') { Sound.toggleMute(); return; }
+  if (c === 'Minus' || c === 'NumpadSubtract') { setFire(fire - CFG.fireStep); return; }
+  if (c === 'Equal' || c === 'NumpadAdd') { setFire(fire + CFG.fireStep); return; }
+  if (state !== 'playing') {
+    if (c === 'Space' || c === 'Enter') { e.preventDefault(); if (!e.repeat) confirmKey(); }
+    return;
+  }
+  if (paused) {
+    if (c === 'Escape' || c === 'Space' || c === 'Enter') { e.preventDefault(); if (!e.repeat) { paused = false; Sound.play('resume'); } }
+    return;
+  }
+  if (c === 'Space' || c === 'Backspace' || c === 'Delete') e.preventDefault();
+  if (e.repeat && c !== 'Backspace') return;
+  if (c in KEY_ING) addIngredient(KEY_ING[c]);
+  else if (c in KEY_SLOT) slotAction(KEY_SLOT[c], false);
+  else if (c in KEY_CUST) serve(KEY_CUST[c]);
+  else if (c === 'Space' || c === 'Enter') { if (G.assembly.length) placeAssembly(); else if (G.held) cancelHold(); }
+  else if (c === 'Backspace') undo();
+  else if (c === 'KeyX' || c === 'Delete') trashAction();
+  else if (c === 'Escape') { if (G.held) cancelHold(); else { paused = true; Sound.play('pause'); } }   // 手上有串先放回去，沒有就暫停
+});
+
+/* ============================================================
+ *  繪圖
+ * ============================================================ */
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function T(s, x, y, size, color = '#fff', align = 'center', weight = '700', stroke = null) {
+  ctx.font = `${weight} ${size}px ${FONT}`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  if (stroke) { ctx.lineWidth = stroke; ctx.strokeStyle = 'rgba(0,0,0,.65)'; ctx.lineJoin = 'round'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color;
+  ctx.fillText(s, x, y);
+}
+
+// 單一食材。stage = -1 表示生食材（未烤），0~4 對應烤熟度
+const TINT_CACHE = {};
+const artReady = img => !!(img && img.complete && img.naturalWidth);
+// 太生 / 有點沒熟 / 焦了：把美術圖依輪廓疊色（只疊在不透明的像素上）
+function tintedArt(key, stage, img) {
+  const ov = stage === 0 ? 'rgba(255,255,255,.4)' : stage === 1 ? 'rgba(255,255,255,.15)' : stage === 4 ? 'rgba(15,10,10,.72)' : null;
+  if (!ov) return img;
+  const k = key + stage;
+  if (!TINT_CACHE[k]) {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0);
+    g.globalCompositeOperation = 'source-atop';
+    g.fillStyle = ov; g.fillRect(0, 0, c.width, c.height);
+    TINT_CACHE[k] = c;
+  }
+  return TINT_CACHE[k];
+}
+
+function drawItem(id, x, y, size, stage) {
+  const ing = ING[id];
+  const img = ART['ing_' + id];
+  if (artReady(img)) {            // 有美術：直接畫圖，不畫色塊圓
+    const s = size * 1.2;
+    ctx.save();
+    if (stage === 3) { ctx.shadowColor = '#ffe082'; ctx.shadowBlur = 14; }
+    else if (stage === 4) { ctx.shadowColor = 'rgba(255,140,60,.95)'; ctx.shadowBlur = 9; }   // 焦掉的：橘紅餘燼光邊，不會融進炭火
+    ctx.drawImage(tintedArt('ing_' + id, stage, img), x - s / 2, y - s / 2, s, s);
+    ctx.restore();
+    return;
+  }
+  ctx.save();
+  if (stage === 3) { ctx.shadowColor = '#ffe082'; ctx.shadowBlur = 14; }
+  ctx.beginPath(); ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+  ctx.fillStyle = ing.color; ctx.fill();
+  ctx.restore();
+  T(ing.emoji, x, y + 1, size * 0.62, '#fff', 'center', '400');
+  const ov = stage === 0 ? 'rgba(255,255,255,.4)' : stage === 1 ? 'rgba(255,255,255,.15)' : stage === 4 ? 'rgba(15,10,10,.72)' : null;
+  if (ov) { ctx.beginPath(); ctx.arc(x, y, size / 2, 0, Math.PI * 2); ctx.fillStyle = ov; ctx.fill(); }
+  ctx.beginPath(); ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+  ctx.lineWidth = stage === 3 ? 3 : 2;
+  ctx.strokeStyle = stage === 3 ? '#ffe082' : 'rgba(0,0,0,.35)';
+  ctx.stroke();
+}
+
+function drawSkewer(items, cx, cy, size, step, stage) {
+  const total = (items.length - 1) * step;
+  ctx.strokeStyle = '#c8a46a'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx - total / 2 - size * 0.95, cy + 2);
+  ctx.lineTo(cx + total / 2 + size * 0.95, cy - 2);
+  ctx.stroke();
+  items.forEach((id, k) => drawItem(id, cx - total / 2 + k * step, cy, size, stage));
+}
+
+function drawBackground() {
+  if (artReady(ART.bg_scene)) {
+    ctx.drawImage(ART.bg_scene, 0, 0, W, 318);          // 客人區的夜景（圖已裁成 540:318 的比例）
+    const hg = ctx.createLinearGradient(0, 0, 0, 64);    // 頂端壓暗一點，時間與分數才讀得清楚
+    hg.addColorStop(0, 'rgba(5,8,24,.6)'); hg.addColorStop(1, 'rgba(5,8,24,0)');
+    ctx.fillStyle = hg; ctx.fillRect(0, 0, W, 64);
+  } else {
+    drawProceduralSky();                                 // 沒有美術時的程式繪製備援
+  }
+  // 烤架區 / 下方
+  ctx.fillStyle = '#1a1512'; ctx.fillRect(0, 318, W, 330);
+  ctx.fillStyle = '#121516'; ctx.fillRect(0, 648, W, H - 648);
+  ctx.strokeStyle = 'rgba(255,255,255,.035)'; ctx.lineWidth = 1;          // 細網格底
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 30) { ctx.moveTo(x + .5, 648); ctx.lineTo(x + .5, H); }
+  for (let y = 648; y <= H; y += 30) { ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); }
+  ctx.stroke();
+}
+
+function drawProceduralSky() {
+  const sky = ctx.createLinearGradient(0, 0, 0, 260);
+  sky.addColorStop(0, '#0b1230'); sky.addColorStop(1, '#2d3b7c');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, 300);
+  stars.forEach(s => {
+    ctx.globalAlpha = 0.4 + 0.5 * Math.abs(Math.sin(clock * 1.5 + s.p));
+    ctx.fillStyle = '#fff'; ctx.fillRect(s.x, s.y, 2, 2);
+  });
+  ctx.globalAlpha = 1;
+  // 大月亮
+  const mg = ctx.createRadialGradient(270, 165, 20, 270, 165, 130);
+  mg.addColorStop(0, 'rgba(255,244,196,.95)'); mg.addColorStop(0.55, 'rgba(255,236,160,.55)'); mg.addColorStop(1, 'rgba(255,236,160,0)');
+  ctx.fillStyle = mg; ctx.fillRect(100, 20, 340, 290);
+  // 海
+  const sea = ctx.createLinearGradient(0, 232, 0, 320);
+  sea.addColorStop(0, '#1b3b7a'); sea.addColorStop(1, '#0e2250');
+  ctx.fillStyle = sea; ctx.fillRect(0, 232, W, 90);
+  ctx.strokeStyle = 'rgba(255,236,160,.35)'; ctx.lineWidth = 2;
+  for (let k = 0; k < 5; k++) {
+    const y = 242 + k * 14, w = 90 - k * 12 + Math.sin(clock * 2 + k) * 10;
+    ctx.beginPath(); ctx.moveTo(270 - w, y); ctx.lineTo(270 + w, y); ctx.stroke();
+  }
+}
+
+// 按鍵提示（鍵帽）：做成真正的按鍵樣子，並且只在用鍵盤時顯示；active 代表「現在按這個有用」會亮起來
+function keycap(x, y, label, active) {
+  if (touchMode) return;
+  ctx.font = `900 12px ${FONT}`;
+  const w = Math.max(22, ctx.measureText(label).width + 14), h = 20;
+  // 純平面小標籤：淺底深字，沒有陰影、描邊或厚度，放在深色衣服或炭火上都醒目；亮起時是金色
+  ctx.fillStyle = active ? '#ffd54f' : '#eef0fb';
+  rr(x - w / 2, y - h / 2, w, h, 6); ctx.fill();
+  T(label, x, y + 0.5, 12, active ? '#3a2400' : '#1b2147', 'center', '900');
+}
+
+// 復原圖示（向量箭頭）。不用 ↩ 字元，因為系統會把它渲染成彩色 emoji 方塊
+function drawUndoIcon(cx, cy, s, color) {
+  ctx.save();
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.3, cy - s * 0.15); ctx.lineTo(cx + s * 0.2, cy - s * 0.15);
+  ctx.quadraticCurveTo(cx + s * 0.62, cy - s * 0.15, cx + s * 0.62, cy + s * 0.22);
+  ctx.quadraticCurveTo(cx + s * 0.62, cy + s * 0.58, cx + s * 0.2, cy + s * 0.58);
+  ctx.lineTo(cx - s * 0.1, cy + s * 0.58);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - s * 0.62, cy - s * 0.15); ctx.lineTo(cx - s * 0.2, cy - s * 0.5); ctx.lineTo(cx - s * 0.2, cy + s * 0.2);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawHUD() {
+  const k = G.timeLeft / CFG.gameSeconds, low = G.timeLeft <= 10;
+  const pulse = low ? 0.5 + 0.5 * Math.sin(clock * 9) : 0;
+  // 暫停鈕：米色方塊 + 左上小綠缺角
+  const pz = L.pause;
+  ctx.fillStyle = UI.beige; rr(pz.x, pz.y, 34, 34, 8); ctx.fill(); uiNotch(pz.x, pz.y, 9);
+  ctx.fillStyle = UI.ink; rr(pz.x + 10, pz.y + 9, 5, 16, 2); ctx.fill(); rr(pz.x + 19, pz.y + 9, 5, 16, 2); ctx.fill();
+  // 剩餘時間：米色標籤，最後 10 秒轉紅色閃爍
+  ctx.fillStyle = low ? `rgb(255,${170 + pulse * 60 | 0},${170 + pulse * 60 | 0})` : UI.beige;
+  rr(48, 9, 76, 34, 8); ctx.fill(); uiNotch(48, 9, 9);
+  T('TIME', 62, 19, 9, '#6a645a', 'left', '800');
+  T(String(Math.ceil(G.timeLeft)), 118, 29, 23, low ? '#a3121f' : UI.ink, 'right', '900');
+  // 進度條：深色軌道、金色漸層；月亮是滑塊；圓點標出新食材解鎖的時間
+  const bx = 134, bw = 256, by = 17, bh = 18, fw = Math.max(0, bw * k);
+  ctx.fillStyle = UI.deep; rr(bx - 4, by - 4, bw + 8, bh + 8, 11); ctx.fill();
+  ctx.strokeStyle = low ? '#ff8a80' : 'rgba(227,219,203,.85)'; ctx.lineWidth = 2; ctx.stroke();
+  if (fw > 3) {
+    const g = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+    if (low) { g.addColorStop(0, '#ff5252'); g.addColorStop(1, '#ff9e80'); }
+    else { g.addColorStop(0, '#ff9800'); g.addColorStop(1, '#ffe082'); }
+    ctx.fillStyle = g; rr(bx, by, fw, bh, 8); ctx.fill();
+  }
+  INGREDIENTS.forEach((ing, i) => {
+    if (!ing.unlockAt) return;
+    const mx = bx + bw * (1 - ing.unlockAt / CFG.gameSeconds);
+    ctx.globalAlpha = G.unlocked[i] ? 0.45 : 1;
+    ctx.beginPath(); ctx.arc(mx, by + bh / 2, 6, 0, Math.PI * 2);
+    ctx.fillStyle = ing.color; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+    ctx.globalAlpha = 1;
+  });
+  {                                                                  // 最後衝刺的起點：紅色圓點
+    const rx = bx + bw * (1 - CFG.rushAt / CFG.gameSeconds);
+    ctx.globalAlpha = G.rushed ? 0.45 : 1;
+    ctx.beginPath(); ctx.arc(rx, by + bh / 2, 6, 0, Math.PI * 2); ctx.fillStyle = UI.red; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.globalAlpha = 1;
+  }
+  ctx.save(); ctx.shadowColor = 'rgba(255,230,150,.95)'; ctx.shadowBlur = 12;
+  T('🌕', bx + fw, by + bh / 2 + 1, 26, '#fff', 'center', '400');
+  ctx.restore();
+  // 分數：米色標籤
+  ctx.fillStyle = UI.beige; rr(406, 9, 126, 34, 8); ctx.fill(); uiNotch(406, 9, 9);
+  T('SCORE', 420, 19, 9, '#6a645a', 'left', '800');
+  ctx.save(); ctx.translate(524, 29); ctx.scale(1 + FX.bump * 0.7, 1 + FX.bump * 0.7);
+  T(String(Math.round(G.shown)), 0, 0, 23, UI.ink, 'right', '900');
+  ctx.restore();
+  // 完美連擊：洋紅標籤
+  if (G.streak >= 2) {
+    ctx.fillStyle = UI.magenta; rr(8, 48, 104, 20, 6); ctx.fill();
+    T('🔥 連擊 x' + G.streak, 60, 58, 13, '#fff', 'center', '800');
+  }
+  // 最後 5 秒大倒數
+  if (G.timeLeft <= 5) {
+    const f = G.timeLeft % 1;
+    ctx.globalAlpha = 0.12 + 0.28 * f;
+    T(String(Math.ceil(G.timeLeft)), W / 2, 470, 190 + (1 - f) * 40, '#ff8a80', 'center', '900');
+    ctx.globalAlpha = 1;
+  }
+}
+
+// 點單氣泡（座標以客人中心為原點；y 為氣泡上緣，headY 為要指向的頭頂位置）
+// 食材要夠大才認得出來，所以 4 個食材的氣泡會比隊伍間距寬；相鄰客人的氣泡錯開成高低兩層，不會互相蓋住。
+// 離頭頂近就用小尖角，離得遠（高層）就用思考泡泡的小圓點連到頭上。
+function drawBubble(y, order, headY) {
+  const n = order.length, w = n * 28 + 10, h = 34, x = -w / 2;
+  ctx.fillStyle = '#fff8e7'; ctx.strokeStyle = '#6b4a2b'; ctx.lineWidth = 3;
+  rr(x, y, w, h, 11); ctx.fill(); ctx.stroke();
+  const gap = headY - (y + h);
+  if (gap <= 20) {
+    ctx.beginPath(); ctx.moveTo(-6, y + h - 1); ctx.lineTo(6, y + h - 1); ctx.lineTo(0, y + h + Math.max(5, gap)); ctx.closePath();
+    ctx.fillStyle = '#fff8e7'; ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-6, y + h); ctx.lineTo(0, y + h + Math.max(6, gap) + 1); ctx.lineTo(6, y + h); ctx.stroke();
+  } else {
+    [[0, y + h + 7, 4.5], [0, y + h + 18, 3.5], [0, y + h + 27, 2.5]].forEach(([dx, dy, r]) => {
+      if (dy > headY) return;
+      ctx.beginPath(); ctx.arc(dx, dy, r, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff8e7'; ctx.fill(); ctx.stroke();
+    });
+  }
+  const mult = CFG.orderMult[n] || 1;                               // 複雜點單：氣泡右上角標出分數倍率
+  if (mult > 1) {
+    const hot = n >= 4, tw = 34, tx = -tw / 2, ty = y - 9;                 // 置中在上緣：不會被隔壁的氣泡蓋到
+    ctx.fillStyle = hot ? UI.magenta : '#ffd54f'; rr(tx, ty, tw, 17, 5); ctx.fill();
+    T('×' + mult, tx + tw / 2, ty + 9, 11, hot ? '#fff' : '#3a2400', 'center', '900');
+  }
+  order.forEach((id, k) => {
+    const cx = x + 5 + 14 + k * 28, cy = y + h / 2;
+    ctx.beginPath(); ctx.arc(cx, cy, 14.5, 0, Math.PI * 2);        // 每種食材自己的顏色底圈，色相一眼可辨
+    ctx.fillStyle = ING[id].color + '66'; ctx.fill();
+    drawItem(id, cx, cy, 26, -1);
+  });
+}
+
+// 客人立繪的位置與大小。圖由 tools/process_assets.py 依頭部位置對齊（頭在圖的水平正中央）、
+// 寬度依身體範圍決定而且不裁切身體，這裡只統一縮放，並把整個人夾在畫面內，不讓畫面邊緣切到。
+function custLayout(c, i) {
+  const img = ART['cust_' + c.animal];
+  const ready = artReady(img);
+  const k = QUEUE.drawW / QUEUE.artW * (CUST_BY_ID[c.animal].scale || 1);
+  const dw = ready ? img.naturalWidth * k : 120;
+  const dh = ready ? img.naturalHeight * k : QUEUE.drawW * 582 / QUEUE.artW;
+  const dx = c.shake > 0 ? Math.sin(clock * 60) * 6 * (c.shake / 0.4) : 0;
+  return {
+    img, ready, dw, dh,
+    x: Math.max(dw / 2, Math.min(W - dw / 2, c.x)) + dx,
+    // 以櫃台為基準錨定下緣；放大／縮小時頭頂跟著變，人物不會飄起來或陷進櫃台
+    headTop: QUEUE.counterY + 2 - dh + (i % 2 ? 10 : 0),
+  };
+}
+
+// 第一層：立繪本體（站在櫃台後面，下緣被櫃台遮住）。以櫃台為支點微微呼吸與晃動；走進來時上下顛簸像在走路
+function drawCustomerBody(c, i) {
+  const a = custLayout(c, i);
+  const moving = Math.abs(c.x - L.qx(i)) > 6;
+  const bob = moving ? -Math.abs(Math.sin(clock * 12 + i)) * 5 : 0;
+  ctx.save();
+  ctx.globalAlpha = c.state === 'leaving' ? Math.max(0, c.timer / 0.9) : 1;
+  ctx.translate(a.x, QUEUE.counterY + bob);
+  ctx.rotate(Math.sin(clock * 0.8 + i * 2.3) * 0.004);
+  ctx.scale(1, 1 + Math.sin(clock * 1.7 + i * 1.9) * 0.007);
+  const top = a.headTop - QUEUE.counterY;
+  if (a.ready) ctx.drawImage(a.img, -a.dw / 2, top, a.dw, a.dh);
+  else T(CUST_BY_ID[c.animal].emoji, 0, top + 64, 120, '#fff', 'center', '400');   // 還沒有美術時的佔位
+  ctx.restore();
+}
+
+// 第二層：頭上點單氣泡、耐心條、鍵位（畫在所有立繪之上，不會被隔壁的人蓋住）
+function drawCustomerHud(c, i) {
+  const a = custLayout(c, i), headTop = a.headTop;
+  const r = Math.max(0, c.patience / c.max);
+  const leaving = c.state === 'leaving';
+  const edge = r > 0.5 ? '#81c784' : r > 0.25 ? '#ffd54f' : '#ef5350';
+
+  ctx.save();
+  ctx.globalAlpha = leaving ? Math.max(0, c.timer / 0.9) : 1;
+  ctx.translate(a.x, 0);
+
+  if (leaving) {
+    T(c.mood, 44, headTop + 14 - (0.9 - c.timer) * 20, 30, '#fff', 'center', '400');
+  } else if (c.arrived) {
+    ctx.save(); ctx.translate(0, Math.sin(clock * 2.2 + i * 1.3) * 1.6);     // 氣泡微微上下浮動
+    drawBubble(Math.max(i % 2 ? 56 : 92, i % 2 ? headTop - 86 : headTop - 44), c.order, headTop - 3);
+    ctx.restore();
+    if (r < 0.33) T('💦', 44, headTop + 22, 22, '#fff', 'center', '400');
+    keycap(0, QUEUE.counterY - 42, 'YUIOP'[i], !!G.held);          // 手上有串時亮起，提示「現在可以按這個交餐」
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; rr(-42, QUEUE.counterY - 22, 84, 9, 4.5); ctx.fill();
+    ctx.fillStyle = edge; rr(-42, QUEUE.counterY - 22, Math.max(6, 84 * r), 9, 4.5); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCounter() {
+  // 立繪下緣先漸層壓暗，像是站在櫃台後面，而不是被一刀切掉
+  const g = ctx.createLinearGradient(0, QUEUE.counterY - 46, 0, QUEUE.counterY);
+  g.addColorStop(0, 'rgba(14,10,26,0)'); g.addColorStop(1, 'rgba(14,10,26,.72)');
+  ctx.fillStyle = g; ctx.fillRect(0, QUEUE.counterY - 46, W, 46);
+  ctx.fillStyle = '#7a4e2d'; ctx.fillRect(0, QUEUE.counterY, W, 8);
+  ctx.fillStyle = '#9b6a42'; ctx.fillRect(0, QUEUE.counterY, W, 3);
+}
+
+function drawSlot(i) {
+  const r = L.slot(i), sk = G.grill[i];
+  ctx.fillStyle = '#2a2320'; ctx.strokeStyle = '#4a3b32'; ctx.lineWidth = 3;
+  rr(r.x, r.y, r.w, r.h, 14); ctx.fill(); ctx.stroke();
+  ctx.save(); rr(r.x, r.y, r.w, r.h, 14); ctx.clip();
+  const gr = ART.grate;
+  if (artReady(gr)) {                                    // 烤架材質：等比覆蓋格子（上下置中裁切）
+    const sh = gr.naturalWidth * r.h / r.w;
+    ctx.drawImage(gr, 0, (gr.naturalHeight - sh) / 2, gr.naturalWidth, sh, r.x, r.y, r.w, r.h);
+    const dg = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);   // 壓暗中上段讓食物跳出來，底部留餘燼光
+    dg.addColorStop(0, 'rgba(8,5,4,.6)'); dg.addColorStop(0.7, 'rgba(8,5,4,.42)'); dg.addColorStop(1, 'rgba(8,5,4,.05)');
+    ctx.fillStyle = dg; ctx.fillRect(r.x, r.y, r.w, r.h);
+  } else {
+    ctx.strokeStyle = 'rgba(255,255,255,.07)'; ctx.lineWidth = 2;
+    for (let x = r.x + 14; x < r.x + r.w; x += 14) { ctx.beginPath(); ctx.moveTo(x, r.y); ctx.lineTo(x, r.y + r.h); ctx.stroke(); }
+  }
+  if (sk) {
+    const g = ctx.createLinearGradient(0, r.y + r.h, 0, r.y + r.h - 80);
+    g.addColorStop(0, 'rgba(255,110,20,.6)'); g.addColorStop(1, 'rgba(255,110,20,0)');
+    ctx.fillStyle = g; ctx.fillRect(r.x, r.y + r.h - 80, r.w, 80);
+    ctx.fillStyle = 'rgba(255,170,50,.55)';
+    const fk = 0.5 + 0.5 * fire;   // 火力越大，火焰越高
+    for (let k = 0; k < 7; k++) {
+      const fx = r.x + 14 + k * 21, fh = (14 + 8 * Math.sin(clock * 9 + k * 1.7)) * fk;
+      ctx.beginPath(); ctx.moveTo(fx - 8, r.y + r.h); ctx.lineTo(fx, r.y + r.h - fh); ctx.lineTo(fx + 8, r.y + r.h); ctx.fill();
+    }
+  }
+  ctx.restore();
+  {                                                                              // 邊框蓋在材質上面；完美時金框脈動、焦掉時紅框
+    const s0 = sk ? stageOf(sk.t) : -1;
+    ctx.strokeStyle = s0 === 3 ? `rgba(255,213,79,${0.6 + 0.4 * Math.sin(clock * 8)})` : s0 === 4 ? 'rgba(239,83,80,.85)' : '#4a3b32';
+    ctx.lineWidth = s0 === 3 || s0 === 4 ? 4 : 3; rr(r.x, r.y, r.w, r.h, 14); ctx.stroke();
+  }
+  keycap(r.x + 18, r.y + 17, 'QWEASD'[i], (!!G.held && !sk) || (!G.held && !!sk) || (!G.held && !sk && G.assembly.length > 0));
+  if (!sk) { T('空', r.x + r.w / 2, r.y + r.h / 2 - 8, 22, 'rgba(255,255,255,.4)', 'center', '700', 3); return; }
+
+  const st = stageOf(sk.t);
+  {                                                                              // 剛放上來的串從上面「啪」地落下
+    const d = Math.max(0, 1 - (clock - (sk.born == null ? -9 : sk.born)) / 0.22), cx0 = r.x + r.w / 2, cy0 = r.y + 52;
+    ctx.save();
+    if (d > 0) { ctx.translate(cx0, cy0 - 34 * d * d); ctx.scale(1 + 0.28 * d, 1 + 0.28 * d); ctx.translate(-cx0, -cy0); ctx.globalAlpha = 1 - 0.4 * d; }
+    drawSkewer(sk.items, cx0, cy0, 30, 34, st);
+    ctx.restore();
+  }
+  // 熟度條
+  const bx = r.x + 18, by = r.y + 98, bw = r.w - 36;
+  let prev = 0;
+  CFG.stages.forEach((s, k) => {
+    const end = Math.min(s.until, CFG.barMax);
+    ctx.fillStyle = s.color;
+    ctx.fillRect(bx + (prev / CFG.barMax) * bw, by, ((end - prev) / CFG.barMax) * bw, 9);
+    prev = end;
+  });
+  const mx = bx + Math.min(sk.t, CFG.barMax) / CFG.barMax * bw;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.moveTo(mx - 6, by - 8); ctx.lineTo(mx + 6, by - 8); ctx.lineTo(mx, by); ctx.fill();
+  T(CFG.stages[st].name, r.x + r.w / 2, r.y + 128, 18, CFG.stages[st].color, 'center', '800', 3);
+}
+
+function button(r, fill, stroke, radius = 14) {
+  ctx.fillStyle = fill; ctx.strokeStyle = stroke; ctx.lineWidth = 3;
+  rr(r.x, r.y, r.w, r.h, radius); ctx.fill(); ctx.stroke();
+}
+
+function drawAssemblyRow() {
+  // 組裝區
+  button(L.asm, '#1e2324', '#6b4c8f');
+  const a = L.asm;
+  for (let k = 0; k < CFG.maxSkewer; k++) {
+    const x = a.x + 34 + k * 62;
+    if (k >= G.assembly.length) {
+      ctx.setLineDash([5, 5]); ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x + 4, a.y + 47, 22, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+  if (G.assembly.length) {
+    ctx.strokeStyle = '#c8a46a'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(a.x + 12, a.y + 49); ctx.lineTo(a.x + a.w - 10, a.y + 45); ctx.stroke();
+    G.assembly.forEach((id, k) => {
+      const pop = k === G.assembly.length - 1 ? Math.max(0, 1 - (clock - G.asmT) / 0.2) : 0;   // 剛加的那個彈一下
+      drawItem(id, a.x + 38 + k * 62, a.y + 47 - 8 * pop, 46 * (1 + 0.3 * pop), -1);
+    });
+  } else if (!G.held) {
+    T('點下方食材開始串', a.x + a.w / 2, a.y + 47, 16, 'rgba(255,255,255,.4)');
+  }
+  // 復原
+  const u = L.undo;
+  button(u, '#1e2324', '#6b4c8f');
+  drawUndoIcon(u.x + u.w / 2, u.y + 38, 22, G.assembly.length ? '#fff' : 'rgba(255,255,255,.3)');
+  keycap(u.x + u.w / 2, u.y + 76, '⌫', false);
+  // 放上烤架（文字與鍵帽分區排好，不互相壓到）
+  const p = L.place, ok = G.assembly.length > 0;
+  button(p, ok ? '#19e3a0' : '#1b2523', ok ? '#a8ffe0' : '#2d4a40');
+  T('放上', p.x + p.w / 2, p.y + 23, 20, ok ? '#06241a' : 'rgba(255,255,255,.35)');
+  T('烤架', p.x + p.w / 2, p.y + 47, 20, ok ? '#06241a' : 'rgba(255,255,255,.35)');
+  keycap(p.x + p.w / 2, p.y + 76, 'Space', ok);
+  // 垃圾桶
+  const t = L.trash, hot = !!G.held;
+  const pulse = hot ? 0.5 + 0.5 * Math.sin(clock * 8) : 0;
+  button(t, hot ? '#4a1f27' : '#2a1d20', hot ? `rgb(255,${120 + pulse * 100 | 0},${140 + pulse * 90 | 0})` : '#6b3a46');
+  if (artReady(ART.icon_trash)) ctx.drawImage(ART.icon_trash, t.x + t.w / 2 - 22, t.y + 6, 44, 44);
+  else T('🗑', t.x + t.w / 2, t.y + 28, 30, '#fff', 'center', '400');
+  T('丟棄', t.x + t.w / 2, t.y + 59, 15, 'rgba(255,255,255,.85)');
+  keycap(t.x + t.w / 2, t.y + 79, 'X', hot);
+}
+
+function drawTray() {
+  INGREDIENTS.forEach((ing, i) => {
+    const r = L.tray(i), open = G.unlocked[i];
+    button(r, open ? '#1e2324' : '#161a1b', open ? ing.color : '#2e3436', 12);
+    if (open) {
+      drawItem(ing.id, r.x + r.w / 2, r.y + 44, 52, -1);
+      T(ing.name, r.x + r.w / 2, r.y + 90, 16, '#fff');
+    } else {
+      T('🔒', r.x + r.w / 2, r.y + 44, 32, '#fff', 'center', '400');
+      T(Math.max(0, Math.ceil(ing.unlockAt - elapsed())) + '秒後', r.x + r.w / 2, r.y + 90, 14, 'rgba(255,255,255,.5)');
+    }
+    keycap(r.x + 14, r.y + 14, String(i + 1), false);
+    if (open && G.newBadge[i] > 0) uiBadge(r.x + r.w - 8, r.y + 8);   // 剛解鎖的新食材
+  });
+}
+
+function drawFire() {
+  const lo = fire <= CFG.fireMin, hi = fire >= CFG.fireMax;
+  const col = fire > 1.05 ? '#ffab40' : fire < 0.95 ? '#90caf9' : '#fff';
+  button(L.fireMinus, '#1e2324', '#6b4c8f', 10);
+  T('−', L.fireMinus.x + 22, L.fireMinus.y + 17, 24, lo ? 'rgba(255,255,255,.3)' : '#fff');
+  button(L.fireLabel, '#161a1b', '#3a3f56', 10);
+  T('🔥 火力 ' + Math.round(fire * 100) + '%', L.fireLabel.x + 72, L.fireLabel.y + 17, 17, col);
+  button(L.firePlus, '#1e2324', '#6b4c8f', 10);
+  T('+', L.firePlus.x + 22, L.firePlus.y + 17, 24, hi ? 'rgba(255,255,255,.3)' : '#fff');
+  drawSoundButtons();
+}
+
+// 左下角的音效／音樂開關（向量圖示，關閉時變暗並畫紅色斜線）
+function drawSoundButtons() {
+  [[L.sndSfx, Sound.sfx, 'sfx'], [L.sndMus, Sound.music, 'music'], ...(Haptic.can ? [[L.sndVib, Haptic.on, 'vib']] : [])].forEach(([r, on, kind]) => {
+    button(r, '#1e2324', '#6b4c8f', 10);
+    const cx = r.x + r.w / 2, cy = r.y + r.h / 2, col = on ? '#fff' : 'rgba(255,255,255,.35)';
+    ctx.save(); ctx.fillStyle = col; ctx.strokeStyle = col; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+    if (kind === 'sfx') {
+      ctx.beginPath(); ctx.moveTo(cx - 10, cy - 4); ctx.lineTo(cx - 5, cy - 4); ctx.lineTo(cx + 1, cy - 9); ctx.lineTo(cx + 1, cy + 9); ctx.lineTo(cx - 5, cy + 4); ctx.lineTo(cx - 10, cy + 4); ctx.closePath(); ctx.fill();
+      if (on) { ctx.beginPath(); ctx.arc(cx + 1, cy, 6, -0.9, 0.9); ctx.stroke(); ctx.beginPath(); ctx.arc(cx + 1, cy, 10, -0.9, 0.9); ctx.stroke(); }
+    } else if (kind === 'vib') {                                                  // 手機加上兩側的震動波
+      ctx.lineWidth = 2; rr(cx - 5, cy - 9, 10, 18, 2.5); ctx.stroke();
+      if (on) { ctx.beginPath(); ctx.arc(cx - 9, cy, 4, 2.3, 4); ctx.stroke(); ctx.beginPath(); ctx.arc(cx + 9, cy, 4, -0.85, 0.85); ctx.stroke(); }
+    } else {
+      ctx.beginPath(); ctx.ellipse(cx - 4, cy + 6, 4.5, 3.5, -0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(cx - 0.5, cy + 5); ctx.lineTo(cx - 0.5, cy - 9); ctx.lineTo(cx + 7, cy - 6); ctx.stroke();
+    }
+    if (!on) { ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(cx - 11, cy + 11); ctx.lineTo(cx + 11, cy - 11); ctx.stroke(); }
+    ctx.restore();
+  });
+}
+
+function drawHint() {
+  let text, color = 'rgba(255,255,255,.75)';
+  if (G.msg) { text = G.msg.text; color = '#ff8a80'; }
+  else if (G.held) {
+    const st = stageOf(G.held.sk.t);
+    text = '手上：' + CFG.stages[st].name + '的串 → 點客人交餐，或點 🗑 丟棄';
+    color = '#ffe082';
+  }
+  else if (G.assembly.length) text = '點烤架空位放上去烤（或按「放上烤架」）';
+  else text = '點烤好的串可以拿起來';
+  T(text, W / 2, 770, 16, color, 'center', '700', 3);
+}
+
+function drawHeld() {
+  if (!G.held) return;
+  const st = stageOf(G.held.sk.t);
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 12;
+  drawSkewer(G.held.sk.items, ptr.x, ptr.y - 34, 30, 34, st);
+  ctx.restore();
+  T(CFG.stages[st].name, ptr.x, ptr.y - 6, 16, CFG.stages[st].color, 'center', '800', 3);
+}
+
+function drawPopups() {
+  G.popups.forEach(p => {
+    const k = 1 - p.life / p.max;
+    ctx.globalAlpha = Math.min(1, p.life / 0.4);
+    T(p.text, p.x, p.y - k * 40, 22, p.color, 'center', '800', 5);
+  });
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- UI 元件（風格參考公司專案：炭灰底、洋紅標題列、米色標籤、綠紫漸層邊框；稍微偏向，不照抄） ---------- */
+const UI = { panel: '#1b2021', deep: '#101314', magenta: '#c900df', violet: '#9c43d3', mint: '#19e3a0', beige: '#e3dbcb', beigeDark: '#c6bfaf', ink: '#2a2622', red: '#ff3b5c', dim: '#9fb0b0' };
+
+// 左上角的小綠缺角（米色標籤與按鈕的記號）
+function uiNotch(x, y, s = 9) {
+  ctx.fillStyle = UI.mint;
+  ctx.beginPath(); ctx.moveTo(x + 1, y + 1); ctx.lineTo(x + s, y + 1); ctx.lineTo(x + 1, y + s); ctx.closePath(); ctx.fill();
+}
+
+// 深色面板 + 上紫下青綠的漸層邊框
+function uiPanel(x, y, w, h, r = 22, lw = 4) {
+  ctx.fillStyle = UI.panel; rr(x, y, w, h, r); ctx.fill();
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, UI.violet); g.addColorStop(0.55, '#5a6bd8'); g.addColorStop(1, UI.mint);
+  ctx.strokeStyle = g; ctx.lineWidth = lw; rr(x, y, w, h, r); ctx.stroke();
+}
+
+// 洋紅標題列，兩端有深色棋盤格；通常壓在面板的上緣
+function uiTitleBar(cx, y, w, text, size = 24) {
+  const h = 38, x = cx - w / 2, c = h / 6;
+  ctx.fillStyle = UI.magenta; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#3b0044';
+  for (const ex of [x, x + w - c * 4]) for (let i = 0; i < 4; i++) for (let j = 0; j < 6; j++) if ((i + j) % 2 === 0) ctx.fillRect(ex + i * c, y + j * c, c, c);
+  T(text, cx, y + h / 2 + 1, size, '#fff', 'center', '900');
+}
+
+// 菱形 X（對話框下緣的關閉鈕）
+function uiDiamondX(cx, cy, s = 20) {
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.PI / 4);
+  ctx.fillStyle = '#15181a'; ctx.fillRect(-s * .72, -s * .72, s * 1.44, s * 1.44);
+  const g = ctx.createLinearGradient(-s, -s, s, s); g.addColorStop(0, UI.violet); g.addColorStop(1, UI.mint);
+  ctx.strokeStyle = g; ctx.lineWidth = 3; ctx.strokeRect(-s * .72, -s * .72, s * 1.44, s * 1.44);
+  ctx.restore();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(cx - 7, cy - 7); ctx.lineTo(cx + 7, cy + 7); ctx.moveTo(cx + 7, cy - 7); ctx.lineTo(cx - 7, cy + 7); ctx.stroke();
+}
+
+// 紅色菱形提示（新食材、待處理）
+function uiBadge(cx, cy, s = 9) {
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.PI / 4);
+  ctx.fillStyle = UI.red; ctx.fillRect(-s * .72, -s * .72, s * 1.44, s * 1.44);
+  ctx.restore();
+  T('!', cx, cy + 1, 12, '#fff', 'center', '900');
+}
+
+// 米色資訊標籤
+function uiChip(x, y, w, h, text, size = 15) {
+  ctx.fillStyle = UI.beige; rr(x, y, w, h, 7); ctx.fill();
+  uiNotch(x, y, 9);
+  T(text, x + w / 2, y + h / 2 + 1, size, UI.ink, 'center', '900');
+}
+
+// 純平面按鈕：primary = 青綠實心；beige = 米色（左上小綠缺角）。sub 是上方的英文小標籤
+function uiButton(r, text, kind, sub, pulse) {
+  const sc = pulse ? 1 + 0.02 * Math.sin(clock * 4) : 1;
+  ctx.save();
+  ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(sc, sc); ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
+  const primary = kind === 'primary', big = r.h >= 60;
+  ctx.fillStyle = primary ? UI.mint : UI.beige;
+  rr(r.x, r.y, r.w, r.h, 10); ctx.fill();
+  if (!primary) uiNotch(r.x, r.y, 11);
+  const col = primary ? '#06241a' : UI.ink;
+  if (sub) {
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '2px';
+    T(sub, r.x + r.w / 2, r.y + (big ? 17 : 13), big ? 12 : 10, primary ? 'rgba(6,36,26,.7)' : '#7a7266', 'center', '800');
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+    T(text, r.x + r.w / 2, r.y + r.h / 2 + (big ? 9 : 7), big ? 28 : 20, col, 'center', '900');
+  } else {
+    T(text, r.x + r.w / 2, r.y + r.h / 2 + 1, big ? 28 : 20, col, 'center', '900');
+  }
+  ctx.restore();
+}
+
+// 圓形的角色大頭貼（標題畫面用）；立繪已依頭部置中，取最上方的正方形即可
+function drawFace(id, cx, cy, r) {
+  const img = ART['cust_' + id];
+  ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = 'rgba(30,40,90,.9)'; ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+  if (artReady(img)) {
+    const sw = Math.min(img.naturalWidth, 300);
+    ctx.drawImage(img, (img.naturalWidth - sw) / 2, 0, sw, sw, cx - r, cy - r, r * 2, r * 2);
+  } else T(CUST_BY_ID[id].emoji, cx, cy + 2, r * 1.3, '#fff', 'center', '400');
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.strokeStyle = '#ffd54f'; ctx.lineWidth = 3; ctx.stroke();
+}
+
+function drawTitle() {
+  const g = ctx.createLinearGradient(0, 318, 0, H);
+  g.addColorStop(0, '#171c1d'); g.addColorStop(1, '#0b0e0f');
+  ctx.fillStyle = g; ctx.fillRect(0, 318, W, H - 318);
+  // 站在櫃台後面的一排客人
+  const ids = ['bear', 'rabbit', 'fox', 'panda', 'wolf'];
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, QUEUE.counterY); ctx.clip();
+  for (let i = ids.length - 1; i >= 0; i--) drawCustomerBody({ animal: ids[i], x: L.qx(i), shake: 0, state: 'waiting', timer: 0 }, i);
+  ctx.restore();
+  drawCounter();
+  ctx.save(); ctx.shadowColor = 'rgba(255,190,70,.7)'; ctx.shadowBlur = 26;
+  T('中秋海邊烤肉攤', W / 2, 392, 50, '#ffe082', 'center', '900', 9);
+  ctx.restore();
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '4px';
+  T('MID-AUTUMN  BEACH  BBQ', W / 2, 436, 14, '#ffcc80', 'center', '800');
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+  // 三個步驟
+  const steps = [
+    { n: '1', label: '照單串食材', icon: cx => drawSkewer(['pork', 'scallion', 'corn'], cx, 528, 28, 31, -1) },
+    { n: '2', label: '烤到「完美」', icon: cx => drawSkewer(['pork', 'eggplant'], cx, 528, 32, 36, 3) },
+    { n: '3', label: '端給客人', icon: cx => { drawFace('bear', cx - 22, 530, 27); T('💖', cx + 28, 508, 24, '#fff', 'center', '400'); } },
+  ];
+  steps.forEach((st, i) => {
+    const x = 30 + i * 165, w = 150, cx = x + w / 2;
+    uiPanel(x, 478, w, 124, 14, 2.5);
+    ctx.fillStyle = UI.magenta; ctx.beginPath(); ctx.arc(x + 18, 496, 11, 0, Math.PI * 2); ctx.fill();
+    T(st.n, x + 18, 497, 14, '#fff', 'center', '900');
+    st.icon(cx);
+    T(st.label, cx, 580, 17, '#fff', 'center', '800');
+  });
+  T('烤焦或串錯了？拿起來丟進垃圾桶', W / 2, 634, 17, '#cfd8dc');
+  T('一局 ' + CFG.gameSeconds + ' 秒 · 客人越來越多', W / 2, 662, 17, '#cfd8dc');
+  if (best) uiChip(W / 2 - 90, 684, 180, 34, 'BEST   ' + best, 18);
+  if (artLoaded()) {
+    uiButton(L.btnStart, '開始營業', 'primary', 'START', true);
+    T(touchMode ? '點一下螢幕開始' : '點一下或按 Space 開始', W / 2, 836, 16, 'rgba(255,255,255,.7)');
+  } else {
+    const p = artDone / artTotal;
+    ctx.fillStyle = 'rgba(255,255,255,.12)'; rr(110, 770, 320, 14, 7); ctx.fill();
+    ctx.fillStyle = UI.mint; rr(110, 770, Math.max(10, 320 * p), 14, 7); ctx.fill();
+    T('載入美術中… ' + artDone + '/' + artTotal, W / 2, 810, 16, '#cfd8dc');
+  }
+  T('火力可在下方調整', W / 2, 884, 14, 'rgba(255,255,255,.45)');
+}
+
+function drawOver() {
+  const st = G.stats, sc = G.score, rk = rankOf(sc);
+  ctx.fillStyle = 'rgba(4,6,10,.86)'; ctx.fillRect(0, 0, W, H);
+  uiPanel(36, 112, 468, 664, 24);
+  uiTitleBar(W / 2, 92, 300, '時間到！', 26);
+  const k = Math.min(1, overAge / 1.2), shown = Math.round(sc * (1 - Math.pow(1 - k, 3)));   // 分數數字跳上去
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '3px';
+  T('SCORE', W / 2, 168, 13, UI.dim, 'center', '800');
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+  T(String(shown), W / 2, 226, 76, '#fff', 'center', '900');
+  if (G.newBest) { ctx.fillStyle = UI.magenta; rr(W / 2 - 80, 268, 160, 32, 7); ctx.fill(); T('🎉 新紀錄！', W / 2, 285, 19, '#fff', 'center', '900'); }
+  else uiChip(W / 2 - 90, 268, 180, 32, 'BEST   ' + best, 16);
+  // 稱號
+  ctx.fillStyle = '#12161a'; rr(110, 322, 320, 56, 10); ctx.fill();
+  ctx.strokeStyle = rk.color; ctx.lineWidth = 2.5; rr(110, 322, 320, 56, 10); ctx.stroke();
+  T(rk.name, W / 2, 350, 28, rk.color, 'center', '900');
+  for (let i = 0; i < CFG.ranks.length; i++) T('★', W / 2 + (i - 1.5) * 34, 404, 26, i <= rk.idx ? '#ffd54f' : 'rgba(255,255,255,.18)', 'center', '900');
+  // 成績明細：米色資訊列，右側是數值框
+  const rows = [['✨', '完美', st.perfect], ['😋', '熟了', st.good], ['😐', '沒熟', st.meh], ['🔥', '生／焦', st.bad], ['❌', '送錯', st.wrong], ['💢', '氣走', st.walkout]];
+  rows.forEach(([ic, label, n], i) => {
+    const x = i % 2 ? 282 : 54, y = 436 + Math.floor(i / 2) * 54;
+    ctx.fillStyle = UI.beige; rr(x, y, 204, 44, 8); ctx.fill();
+    uiNotch(x, y, 8);
+    T(ic, x + 26, y + 23, 22, '#fff', 'center', '400');
+    T(label, x + 48, y + 23, 17, UI.ink, 'left', '800');
+    ctx.fillStyle = UI.beigeDark; rr(x + 144, y + 6, 52, 32, 6); ctx.fill();
+    T(String(n), x + 170, y + 23, 22, UI.ink, 'center', '900');
+  });
+  const ready = overAge >= 0.8;
+  ctx.globalAlpha = ready ? 1 : 0.35;
+  uiButton(L.btnAgain, '再來一局', 'primary', 'RETRY', ready);
+  uiButton(L.btnHome, '回標題', 'beige', 'HOME');
+  ctx.globalAlpha = 1;
+  if (ready && !touchMode) T('按 Space 再來一局', W / 2, 790, 15, 'rgba(255,255,255,.55)');
+}
+
+function drawPause() {
+  ctx.fillStyle = 'rgba(4,6,10,.86)'; ctx.fillRect(0, 0, W, H);
+  uiPanel(70, 300, 400, 330, 24);
+  uiTitleBar(W / 2, 282, 240, '暫停中', 24);
+  if (!touchMode) T('按 Esc 或 Space 繼續', W / 2, 372, 14, UI.dim);
+  uiButton(L.btnResume, '繼續', 'primary', 'RESUME', true);
+  uiButton(L.btnRestart, '重新開始', 'beige', 'RESTART');
+  uiButton(L.btnQuit, '回標題', 'beige', 'HOME');
+  uiDiamondX(W / 2, 630);
+}
+
+function drawScene() {
+  drawBackground();
+  if (state === 'title') { drawTitle(); drawFire(); return; }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, W, QUEUE.counterY); ctx.clip();      // 立繪超出櫃台的部分不畫
+  for (let i = G.customers.length - 1; i >= 0; i--) drawCustomerBody(G.customers[i], i);   // 由右往左畫，排在前面的蓋在上面
+  ctx.restore();
+  drawCounter();
+  G.customers.forEach(drawCustomerHud);
+  for (let i = 0; i < CFG.grillSlots; i++) drawSlot(i);
+  drawAssemblyRow();
+  drawHint();
+  drawTray();
+  if (!touchMode) T('1~6 食材 · Space 放上烤架 · QWE/ASD 取放烤串 · YUIOP 交餐 · X 丟棄 · Esc 暫停 · M 靜音', W / 2, 952, 11, 'rgba(255,255,255,.4)');
+  drawHUD();
+  if (state !== 'over') FX.draw();
+  drawPopups();
+  if (!paused) drawHeld();
+  if (paused) drawPause();
+  if (state === 'over') { drawOver(); FX.draw(); }                  // 結算畫面的彩帶畫在卡片上面
+  drawFire();
+}
+
+function draw() {
+  ctx.save();
+  if (FX.shake > 0 && state === 'playing') { const k = FX.shake * 30; ctx.translate((Math.random() - 0.5) * k, (Math.random() - 0.5) * k); }
+  drawScene();
+  ctx.restore();
+}
+
+/* ---------- 主迴圈 ---------- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now; clock += dt;
+  if (state === 'playing' && !paused && !rotateHint && !window.__manualSim) update(dt);     // __manualSim：測試頁自己推進時間，遊戲不要重複推
+  else if (state === 'over') { overAge += dt; FX.update(dt); }
+  Sound.tick();
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

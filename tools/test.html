@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BBQ 自動化測試</title>
+<style>
+body{font:15px/1.55 system-ui,'Microsoft JhengHei','PingFang TC',sans-serif;background:#101314;color:#e8ecff;margin:0;padding:20px;max-width:900px}
+h1{font-size:20px;margin:0 0 6px}
+p{margin:6px 0;color:#9fb0b0}
+code{background:#1b2021;padding:1px 6px;border-radius:5px;color:#e3dbcb}
+button{font:inherit;padding:9px 18px;border-radius:9px;border:0;background:#19e3a0;color:#06241a;font-weight:800;cursor:pointer}
+button:disabled{opacity:.4;cursor:default}
+#sum{margin-left:12px;font-size:17px}
+.row{display:flex;gap:12px;padding:9px 14px;margin:7px 0;border-radius:9px;background:#1b2021;border-left:6px solid #8fa0e8}
+.row.ok{border-left-color:#19e3a0}.row.bad{border-left-color:#ff3b5c}
+.name{width:190px;flex:none;font-weight:800}
+.detail{flex:1;color:#b8c4c4;white-space:pre-wrap;word-break:break-word}
+.row.bad .detail{color:#ffb3c0}
+iframe{position:absolute;left:-9999px;top:0;width:540px;height:960px;border:0}
+</style>
+</head>
+<body>
+<h1>中秋海邊烤肉攤 · 自動化測試</h1>
+<p>要用本機伺服器開（在專案根目錄執行 <code>python -m http.server 8765</code>，再開 <code>http://localhost:8765/tools/test.html</code>）。網址加 <code>?auto</code> 會自動執行；跑完分頁標題會變成 <code>PASS n/n</code> 或 <code>FAIL</code>。</p>
+<p>測試會在隱藏的 iframe 裡載入遊戲，由測試自己推進時間（不依賴真實時間，幾秒內跑完）；跑完會還原你的 localStorage（最高分、火力、音效設定）。</p>
+<p><button id="go" disabled>執行全部測試</button><b id="sum"></b></p>
+<div id="out"></div>
+<iframe id="g" src="../index.html"></iframe>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const KEYS = ['bbq_best', 'bbq_fire', 'bbq_sfx', 'bbq_music', 'bbq_haptic'];
+let win;
+
+// 在遊戲視窗的全域範圍執行 fn(assert)（看得到遊戲裡 let / const 宣告的 G、CFG、update……）
+function inGame(fn) {
+  return win.eval('(function(){ const assert = (c, m) => { if (!c) throw new Error(m); }; return (' + fn.toString() + ')(assert); })()');
+}
+
+const TESTS = [];
+const game = (name, fn) => TESTS.push({ name, where: 'game', fn });
+const page = (name, fn) => TESTS.push({ name, where: 'page', fn });
+
+/* ---------- 1. 資料完整性 ---------- */
+game('素材與設定', function (assert) {
+  assert(artDone === artTotal, '素材尚未載完 ' + artDone + '/' + artTotal);
+  const missing = Object.keys(ART).filter(k => !artReady(ART[k]));
+  assert(!missing.length, '載入失敗的圖：' + missing.join(', '));
+  INGREDIENTS.forEach(i => assert(artReady(ART['ing_' + i.id]), '缺食材圖 ' + i.id));
+  CUSTOMERS.forEach(c => {
+    assert(artReady(ART['cust_' + c.id]), '缺角色圖 ' + c.id);
+    assert(c.scale > 0.5 && c.scale < 1.6, '縮放係數怪怪的 ' + c.id + '=' + c.scale);
+  });
+  assert(CUSTOMERS.length >= CFG.customerSlots, '角色數少於隊伍上限，會湊不出不重複的客人');
+  for (let i = 1; i < CFG.ranks.length; i++) assert(CFG.ranks[i].min > CFG.ranks[i - 1].min, '稱號門檻沒有遞增');
+  for (let i = 1; i < CFG.phases.length; i++) assert(CFG.phases[i].at > CFG.phases[i - 1].at, '壓力階段時間沒有遞增');
+  assert(CFG.rushAt < CFG.gameSeconds, '衝刺時間超過整局');
+  [2, 3, 4].forEach(n => assert(CFG.orderMult[n] >= 1, '缺少 ' + n + ' 個食材的分數倍率'));
+  assert(CFG.orderMult[3] > CFG.orderMult[2] && CFG.orderMult[4] > CFG.orderMult[3], '越複雜的單倍率應該越高');
+  return INGREDIENTS.length + ' 種食材、' + CUSTOMERS.length + ' 位客人、' + Object.keys(ART).length + ' 張圖，全部載入成功';
+});
+
+page('音效名稱對照', async function () {
+  const src = await (await fetch('../index.html')).text();
+  const defined = new Set([...src.matchAll(/^    (\w+):\s+(?:\(\)|\w+)\s*=>/gm)].map(m => m[1]));
+  const used = new Set([...src.matchAll(/Sound\.play\('(\w+)'/g)].map(m => m[1]));
+  const tern = src.match(/Sound\.play\(st === 3 \? '(\w+)' : st === 2 \? '(\w+)' : st === 1 \? '(\w+)' : '(\w+)'/);
+  if (tern) tern.slice(1).forEach(n => used.add(n));
+  const undef = [...used].filter(n => !defined.has(n)), unused = [...defined].filter(n => !used.has(n));
+  if (undef.length) throw new Error('呼叫了但沒定義的音效：' + undef.join(', ') + '（Sound.play 會吞掉例外，這種錯誤是靜默的）');
+  if (unused.length) throw new Error('定義了但沒用到的音效：' + unused.join(', '));
+  return defined.size + ' 個音效，名稱與呼叫完全對得上';
+});
+
+game('音效引擎', function (assert) {
+  Sound.unlock();
+  const r = Sound.test();
+  assert(!r.errs.length, '音效例外：' + r.errs.join('; '));
+  return '所有音效都能建構（音訊狀態：' + r.state + '，沒有使用者操作時是 suspended 屬正常）';
+});
+
+game('音效保護（同時發聲上限）', function (assert) {
+  Sound.unlock();
+  for (let i = 0; i < 8; i++) Sound.test();          // 連續把全部音效觸發 8 輪（走無聲出口）
+  assert(Sound.voices <= 32, '同時發聲的音效超過上限 32：' + Sound.voices);
+  return '連續觸發全部音效 8 輪，同時發聲的音效 = ' + Sound.voices + '（上限 32）；測試期間輸出為靜音（master 增益 0）';
+});
+
+/* ---------- 2. 邏輯 ---------- */
+game('壓力曲線單調', function (assert) {
+  let ps = 1e9, pc = 0, pl = 0, first, last;
+  for (let t = 0; t <= 90; t++) {
+    const c = curve(t), tot = c.lens[2] + c.lens[3] + c.lens[4], mean = (2 * c.lens[2] + 3 * c.lens[3] + 4 * c.lens[4]) / tot;
+    assert(Math.abs(tot - 1) < 0.001, t + ' 秒的點單長度機率總和不是 1：' + tot);
+    assert(c.spawn <= ps + 1e-9, '出客間隔在 ' + t + ' 秒變長了');
+    assert(c.cap >= pc, '同時在場上限在 ' + t + ' 秒變小了');
+    assert(mean >= pl - 1e-9, '平均點單長度在 ' + t + ' 秒變短了');
+    ps = c.spawn; pc = c.cap; pl = mean;
+    if (t === 0) first = { spawn: c.spawn, cap: c.cap, mean }; last = { spawn: c.spawn, cap: c.cap, mean };
+  }
+  return '出客間隔 ' + first.spawn.toFixed(1) + '→' + last.spawn.toFixed(1) + ' 秒；同時在場 ' + first.cap + '→' + last.cap + ' 位；平均點單長度 ' + first.mean.toFixed(1) + '→' + last.mean.toFixed(1);
+});
+
+game('稱號門檻', function (assert) {
+  const last = CFG.ranks.length - 1;
+  assert(rankOf(0).idx === 0, '0 分應該是第一級');
+  for (let i = 1; i <= last; i++) {
+    assert(rankOf(CFG.ranks[i].min - 1).idx === i - 1, '剛好差 1 分不該升級（' + CFG.ranks[i].name + '）');
+    assert(rankOf(CFG.ranks[i].min).idx === i, '剛好達標應該升級（' + CFG.ranks[i].name + '）');
+  }
+  assert(rankOf(1e6).idx === last, '超高分應該是最高級');
+  return CFG.ranks.map(r => r.name + '≥' + r.min).join('、');
+});
+
+game('遊戲流程冒煙', function (assert) {
+  goTitle(); assert(state === 'title', '回到標題');
+  confirmKey(); assert(state === 'playing', '開始遊戲');
+  addIngredient(0); addIngredient(1); assert(G.assembly.length === 2, '串食材');
+  placeAssembly(); assert(G.grill.some(Boolean), '放上烤架'); assert(!G.assembly.length, '組裝區清空');
+  slotAction(G.grill.findIndex(Boolean), false); assert(G.held, '拿起烤串');
+  trashAction(); assert(!G.held, '丟棄');
+  dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape' })); assert(paused, '按 Esc 暫停');
+  dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape' })); assert(!paused, '再按 Esc 繼續');
+  G.timeLeft = 0.01; update(0.05); assert(state === 'over', '時間到進入結算');
+  overAge = 1; confirmKey(); assert(state === 'playing', '再來一局');
+  goTitle();
+  return '標題 → 開始 → 串 → 烤 → 拿起 → 丟棄 → 暫停 → 繼續 → 結算 → 再來一局，全部正常';
+});
+
+game('交餐與計分', function (assert) {
+  startGame(); G.spawnTimer = 999;
+  const mk = (a, o) => ({ animal: a, order: o, max: 30, patience: 25, age: 1, x: L.qx(0), arrived: true, state: 'waiting', shake: 0, mood: '', timer: 0 });
+  const serveWith = (order, t) => {
+    G.customers = [mk('bear', order)];
+    G.held = { sk: { items: order.slice(), t, speed: 0, born: clock }, from: 0 };
+    const before = G.score; serve(0); return G.score - before;
+  };
+  const p2 = serveWith(['pork', 'corn'], 8.6), p3 = serveWith(['pork', 'corn', 'scallion'], 8.6), p4 = serveWith(['pork', 'corn', 'scallion', 'eggplant'], 8.6);
+  assert(p2 > 0 && p3 > p2 && p4 > p3, '越複雜的單應該分數越高：' + [p2, p3, p4]);
+  assert(p4 / p2 > 2.2, '4 個食材的單至少要比 2 個食材高 2.2 倍（超線性）：' + (p4 / p2).toFixed(2));
+  G.customers = [mk('bear', ['pork', 'corn'])]; G.held = { sk: { items: ['corn', 'pork'], t: 8.6, speed: 0, born: clock }, from: 0 };
+  const w0 = G.score; serve(0); assert(G.score === w0 && G.held, '順序錯誤的串不能收下，也不能扣分');
+  const burnt = serveWith(['pork', 'corn'], 12);
+  assert(burnt < 0, '焦掉的串應該扣分：' + burnt);
+  goTitle();
+  return '2/3/4 個食材的完美單：+' + p2 + ' / +' + p3 + ' / +' + p4 + '（倍率 ' + (p3 / p2).toFixed(2) + '、' + (p4 / p2).toFixed(2) + '）；送錯順序不收件';
+});
+
+/* ---------- 3. 壓力測試 ---------- */
+game('隨機壓力測試', function (assert) {
+  const keys = [...Object.keys(KEY_ING), ...Object.keys(KEY_SLOT), ...Object.keys(KEY_CUST), 'Space', 'Backspace', 'KeyX', 'Escape', 'Enter', 'Minus', 'Equal', 'KeyM'];
+  const rnd = n => Math.floor(Math.random() * n);
+  let frames = 0, maxQ = 0;
+  for (let run = 0; run < 3; run++) {
+    goTitle(); startGame();
+    for (let f = 0; f < 1900; f++) {
+      const r = Math.random();
+      if (r < 0.4) onTap(rnd(540), rnd(960), false);
+      else if (r < 0.6) dispatchEvent(new KeyboardEvent('keydown', { code: keys[rnd(keys.length)] }));
+      else if (r < 0.65) onTap(rnd(540), rnd(960), true);
+      if (paused && Math.random() < 0.6) paused = false;
+      if (state !== 'playing') break;
+      update(0.05);
+      if (f % 25 === 0) draw();
+      const ids = G.customers.map(c => c.animal);
+      assert(new Set(ids).size === ids.length, '出現重複頭像：' + ids);
+      assert(G.customers.length <= CFG.customerSlots, '隊伍超過上限');
+      assert(isFinite(G.score) && G.score >= 0, '分數異常：' + G.score);
+      assert(!(G.held && G.grill.includes(G.held.sk)), '手上的串同時還在烤架上');
+      assert(G.assembly.length <= CFG.maxSkewer, '組裝區超過上限');
+      G.customers.forEach(c => assert(isFinite(c.x) && isFinite(c.patience) && CFG.orderMult[c.order.length], '客人資料異常'));
+      frames++; maxQ = Math.max(maxQ, G.customers.length);
+    }
+  }
+  paused = false; goTitle();                      // 設定（音效、音樂、震動、火力）由測試執行器統一比對與還原
+  return frames + ' 個影格的亂點亂按（含暫停、靜音、火力、拖放），資料一致；隊伍最長 ' + maxQ + ' 位';
+});
+
+game('機器人難度曲線', function (assert) {
+  // 機器人：每隔 every 秒做一個動作；照最急的客人依序串、烤到完美才交。沒有思考時間，所以是「專家上限」
+  function bot(every) {
+    startGame(); G.spawnTimer = 3;
+    let acc = 0, building = null, wOpen = 0, wRush = 0;
+    const reserved = new Set();
+    for (let f = 0; f < 1900 && state === 'playing'; f++) {
+      update(0.05); acc += 0.05;
+      const e = 90 - G.timeLeft;
+      if (e < 35) wOpen = G.stats.walkout;
+      if (e < CFG.rushAt) wRush = G.stats.walkout;
+      if (acc < every) continue; acc = 0;
+      if (G.held) {
+        const st = stageOf(G.held.sk.t), ci = G.customers.findIndex(c => c.state === 'waiting' && c.arrived && c.order.join() === G.held.sk.items.join());
+        if (ci >= 0 && st >= 2 && st <= 3) serve(ci); else if (ci >= 0 && st < 2) cancelHold(); else trashAction();
+        continue;
+      }
+      let best = -1, bestSt = -1;
+      G.grill.forEach((sk, i) => {
+        if (!sk) return;
+        const st = stageOf(sk.t), c = G.customers.find(c => c.state === 'waiting' && c.order.join() === sk.items.join());
+        if (st === 4) { if (bestSt < 5) { best = i; bestSt = 5; } }
+        else if (c && st === 3) { if (bestSt < 4) { best = i; bestSt = 4; } }
+        else if (c && st === 2 && c.patience / c.max < 0.25 && bestSt < 3) { best = i; bestSt = 3; }
+      });
+      if (best >= 0) { slotAction(best, false); continue; }
+      if (building) {
+        const c = building;
+        if (!G.customers.includes(c) || c.state !== 'waiting') { G.assembly = []; building = null; continue; }
+        if (G.assembly.length < c.order.length) { addIngredient(INGREDIENTS.findIndex(x => x.id === c.order[G.assembly.length])); continue; }
+        placeAssembly(); reserved.add(c); building = null; continue;
+      }
+      if (G.grill.some(s => !s)) {
+        const c = G.customers.filter(c => c.state === 'waiting' && c.arrived && !reserved.has(c)).sort((a, b) => a.patience - b.patience)[0];
+        if (c) building = c;
+      }
+    }
+    return { score: G.score, walk: G.stats.walkout, open: wOpen, rush: G.stats.walkout - wRush };
+  }
+  const N = 5, res = {};
+  [0.45, 1.0, 1.4].forEach(sp => {
+    const rs = []; for (let k = 0; k < N; k++) rs.push(bot(sp));
+    const avg = f => rs.reduce((a, r) => a + f(r), 0) / rs.length;
+    res[sp] = { score: Math.round(avg(r => r.score)), walk: avg(r => r.walk), open: avg(r => r.open), rush: avg(r => r.rush) };
+  });
+  goTitle();
+  assert(res[0.45].score > res[1.0].score && res[1.0].score > res[1.4].score, '操作越快分數應該越高：' + JSON.stringify(res));
+  assert(res[0.45].score >= 4500, '專家（0.45 秒/動作）應該能拿到 4500 分以上：' + res[0.45].score);
+  assert(res[1.4].score <= 2500, '偏慢的玩家（1.4 秒/動作）不該輕鬆拿高分：' + res[1.4].score);
+  [0.45, 1.0, 1.4].forEach(sp => assert(res[sp].open <= 1.2, '開局（前 35 秒）不該掉客人：' + sp + ' 秒掉 ' + res[sp].open));
+  assert(res[1.0].rush >= 0.4, '最後衝刺應該要有壓力：一般玩家（1.0 秒）衝刺期只掉 ' + res[1.0].rush + ' 位客人');
+  const line = sp => sp + ' 秒/動作：平均 ' + res[sp].score + ' 分，氣走 ' + res[sp].walk.toFixed(1) + '（開局 ' + res[sp].open.toFixed(1) + '／衝刺 ' + res[sp].rush.toFixed(1) + '）';
+  return [0.45, 1.0, 1.4].map(line).join('\n');
+});
+
+/* ---------- 4. 畫面與手感包 ---------- */
+game('繪圖冒煙測試', function (assert) {
+  // 繪圖錯誤只會在畫面上看到，所以把各種畫面狀態都畫一遍，確認不會丟例外
+  const tries = [];
+  const t = (name, fn) => { try { fn(); } catch (e) { tries.push(name + '：' + e.message); } };
+  const mk = (a, o, p, i) => ({ animal: a, order: o, max: 30, patience: p, age: 1, x: L.qx(i), arrived: true, state: 'waiting', shake: 0, mood: '', timer: 0 });
+  [true, false].forEach(tm => {
+    touchMode = tm;
+    t('標題', () => { goTitle(); draw(); });
+    t('遊戲中', () => {
+      startGame(); G.timeLeft = 30; G.spawnTimer = 999; G.unlocked = G.unlocked.map(() => true); G.newBadge[3] = 5; G.streak = 3;
+      G.customers = [mk('bear', ['pork', 'scallion', 'corn', 'eggplant'], 20, 0), mk('rabbit', ['pork', 'corn'], 5, 1), mk('fox', ['corn', 'shrimp', 'scallion'], 20, 2), mk('panda', ['pork', 'corn'], 20, 3), mk('wolf', ['pork', 'corn'], 20, 4)];
+      G.customers[1].state = 'leaving'; G.customers[1].timer = 0.5; G.customers[1].mood = '💢';
+      [0, 3, 6, 8.6, 11, 15].forEach((tt, i) => { G.grill[i] = makeSkewer(['pork', 'corn']); G.grill[i].t = tt; });
+      G.assembly = ['pork', 'eggplant']; G.asmT = clock;
+      FX.emit(30, { x: 200, y: 200, speed: 200, kind: 'spark', color: ['#fff'], life: 1 }); FX.shake = 0.2; FX.bump = 0.3;
+      for (let i = 0; i < 30; i++) update(0.05);
+      draw();
+    });
+    t('手上拿著串', () => { slotAction(0, false); draw(); cancelHold(); });
+    t('暫停', () => { paused = true; draw(); paused = false; });
+    t('結算', () => { G.score = 3000; G.newBest = true; endGame(); overAge = 2; draw(); FX.update(0.1); draw(); });
+    t('結算（剛結束）', () => { overAge = 0.1; draw(); });
+    t('載入中', () => { goTitle(); const d = artDone; artDone = 3; draw(); artDone = d; });
+  });
+  goTitle();
+  assert(!tries.length, tries.join(' | '));
+  return '標題、遊戲中（含離場客人、六種熟度、粒子、震動）、拿著串、暫停、結算、載入中 × 觸控／鍵盤兩種模式，繪圖都沒有丟例外';
+});
+
+game('特效、震動、安全區域', function (assert) {
+  FX.clear(); FX.emit(1000, { x: 100, y: 100, speed: 100, life: 1 });
+  assert(FX.list.length <= 400, '粒子上限沒有生效：' + FX.list.length);
+  for (let i = 0; i < 100; i++) FX.update(0.05);
+  assert(FX.list.length === 0, '粒子沒有消失：' + FX.list.length);
+  FX.emit(20, { x: 1, y: 1, speed: 300, life: 0.5, g: 200, drag: 1, kind: 'spark', color: ['#fff'] }); FX.update(0.1);
+  assert(FX.list.every(p => isFinite(p.x) && isFinite(p.y) && isFinite(p.size)), '粒子座標出現 NaN');
+  FX.clear();
+  ['perfect', 'wrong', 'burnt', 'over', 'unknown'].forEach(n => Haptic.pulse(n));   // 不支援的環境會直接略過；支援的環境不能丟例外
+  const b = document.body, old = b.style.cssText;
+  b.style.padding = '44px 12px 34px 12px'; resize();                             // 模擬瀏海與手勢條
+  const r = canvas.getBoundingClientRect();
+  const okSafe = r.height <= innerHeight - 78 + 1 && r.width <= innerWidth - 24 + 1;
+  b.style.cssText = old; resize();
+  assert(okSafe, '畫布超出安全區域：' + Math.round(r.width) + 'x' + Math.round(r.height) + ' / 視窗 ' + innerWidth + 'x' + innerHeight);
+  return '粒子上限（400）與消散、震動 API（' + (Haptic.can ? '此環境支援' : '此環境不支援，已略過') + '）、安全區域縮放 都正常';
+});
+
+/* ---------- 使用者設定：測試前後比對並還原 ---------- */
+// 壓力測試會隨機亂點畫面，可能點到左下角的音效／音樂／震動開關或火力 ± 而把設定永久改掉
+// （設定存在 localStorage，而且預覽視窗跟玩家看到的遊戲共用同一份），所以每個測試前後都要比對、還原。
+function snapshot() { return win.eval('({ sfx: Sound.sfx, music: Sound.music, vib: Haptic.on, fire })'); }
+function restoreSettings(s0) {
+  const now = snapshot(), changed = [];
+  if (now.sfx !== s0.sfx) { changed.push('音效'); win.eval('Sound.toggleSfx()'); }
+  if (now.music !== s0.music) { changed.push('音樂'); win.eval('Sound.toggleMusic()'); }
+  if (now.vib !== s0.vib) { changed.push('震動'); win.eval('Haptic.toggle()'); }
+  if (Math.abs(now.fire - s0.fire) > 1e-9) { changed.push('火力'); win.eval('setFire(' + s0.fire + ')'); }
+  return changed;
+}
+
+// 隨機壓力測試會亂點到設定按鈕，這是合法的輸入所以不排除；它允許改動，由執行器負責還原。其他測試一律不准動設定。
+TESTS.find(t => t.name === '隨機壓力測試').restores = true;
+
+/* ---------- 執行 ---------- */
+function addRow(name, cls, detail) {
+  const d = document.createElement('div'); d.className = 'row ' + cls;
+  d.innerHTML = '<div class="name"></div><div class="detail"></div>';
+  d.children[0].textContent = name; d.children[1].textContent = detail;
+  $('out').appendChild(d); return d;
+}
+function setRow(row, cls, detail) { row.className = 'row ' + cls; row.children[1].textContent = detail; }
+
+async function runAll() {
+  $('go').disabled = true; $('out').innerHTML = ''; $('sum').textContent = '執行中…';
+  const saved = {}; KEYS.forEach(k => saved[k] = localStorage.getItem(k));
+  let pass = 0;
+  for (const t of TESTS) {
+    const row = addRow(t.name, '', '…'); await sleep(20);
+    const t0 = performance.now();
+    const before = t.where === 'game' ? snapshot() : null;       // 測試前先記下使用者設定
+    try {
+      const d = t.where === 'page' ? await t.fn() : inGame(t.fn);
+      const changed = before ? restoreSettings(before) : [];      // 測試後檢查設定有沒有被動到，並還原
+      if (changed.length && !t.restores) throw new Error('測試本身通過，但它偷偷改動了使用者設定（' + changed.join('、') + '），已還原。測試不該動到設定。');
+      setRow(row, 'ok', d + '   (' + Math.round(performance.now() - t0) + ' ms)'); pass++;
+    } catch (e) {
+      if (before) restoreSettings(before);
+      setRow(row, 'bad', String(e && e.message || e));
+    }
+  }
+  KEYS.forEach(k => saved[k] == null ? localStorage.removeItem(k) : localStorage.setItem(k, saved[k]));
+  try { win.eval('goTitle()'); } catch (e) {}
+  const ok = pass === TESTS.length;
+  $('sum').textContent = (ok ? '✅ 全部通過 ' : '❌ 有失敗 ') + pass + '/' + TESTS.length;
+  $('sum').style.color = ok ? '#19e3a0' : '#ff8aa0';
+  document.title = (ok ? 'PASS ' : 'FAIL ') + pass + '/' + TESTS.length;
+  $('go').disabled = false;
+}
+
+$('g').addEventListener('load', async () => {
+  win = $('g').contentWindow;
+  for (let i = 0; i < 100; i++) { try { if (win.eval('artLoaded() && artDone >= artTotal')) break; } catch (e) {} await sleep(100); }
+  win.__manualSim = true;                       // 讓遊戲自己的影格迴圈不要推進時間，由測試控制
+  $('go').disabled = false;
+  if (location.search.includes('auto')) runAll();
+});
+$('go').addEventListener('click', runAll);
+</script>
+</body>
+</html>

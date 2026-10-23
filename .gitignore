@@ -1,0 +1,14 @@
+# 本機預覽用的設定（Claude Code 預覽伺服器）
+.claude/
+
+# Codex 任務的執行紀錄（體積大、含本機路徑）；任務檔 tools/codex/tasks/ 要保留
+tools/codex/out/
+
+__pycache__/
+*.pyc
+
+# ── 發布前請自己決定 ──────────────────────────────────────────
+# assets/raw/ 是 Codex 的原圖與被封存的版本（約 36 MB）。遊戲實際只載入 assets/ 裡約 4 MB 的成品。
+# raw 是「重新處理成品」的唯一來源——如果不放進倉庫，請另外備份。
+# 目前「不公開」：只推成品。之後想公開，刪掉下一行，再 git add assets/raw && git commit && git push 即可。
+assets/raw/
