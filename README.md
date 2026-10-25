@@ -102,3 +102,6 @@ tools/check_raw.py        新圖審查前的客觀檢查（尺寸、純綠背景
 
 ## FEVER TIME
 交出「熟了」「完美」的餐點會充能量條（送錯、客人走掉會扣一點），滿了進入 12 秒狂熱：烤串一放上烤架（或拿在手上）就直接是完美、不會焦；來客間隔縮成 0.3 倍、隊伍開到上限；得分 ×2、客人耐心凍結；背景轉熱紅色、音樂換成更快更高的版本。參數在 `CFG.fever`。
+
+## 第三方素材
+- `assets/sfx/`：10 個音效取自 [Kenney Interface Sounds](https://opengameart.org/content/interface-sounds)（CC0，授權文字在 `assets/sfx/KENNEY_LICENSE.txt`）。載入失敗或瀏覽器不支援 ogg 時，遊戲會退回程式合成的音效。

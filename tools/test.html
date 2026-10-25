@@ -82,6 +82,14 @@ game('音效引擎', function (assert) {
   return '所有音效都能建構（音訊狀態：' + r.state + '，沒有使用者操作時是 suspended 屬正常）';
 });
 
+page('錄好的音效載入', async function () {
+  win.eval('Sound.unlock()');
+  let st;
+  for (let i = 0; i < 40; i++) { st = win.eval('Sound.samples'); if (st.loaded === st.total) break; await sleep(100); }
+  if (st.loaded !== st.total) throw new Error('取樣沒載完 ' + st.loaded + '/' + st.total + '（assets/sfx 缺檔，或這個瀏覽器不支援 ogg；遊戲會退回合成音）');
+  return st.total + ' 個取樣（Kenney，CC0）全部載入並可播放；沒載入時會退回合成音';
+});
+
 game('音效保護（同時發聲上限）', function (assert) {
   Sound.unlock();
   for (let i = 0; i < 8; i++) Sound.test();          // 連續把全部音效觸發 8 輪（走無聲出口）

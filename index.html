@@ -422,6 +422,7 @@ const Sound = (() => {
     lfo.connect(lg); lg.connect(wg.gain);
     wv.connect(lp); lp.connect(wg); wg.connect(musBus); wv.start(); lfo.start();
     setInterval(schedule, 90);
+    loadSamples();
     return ac;
   }
 
@@ -569,6 +570,31 @@ const Sound = (() => {
     record:  () => [9, 10, 11, 12].forEach((d, k) => bell({ f: note(d), t: 0.9 + k * 0.08, vol: 0.08, dur: 1.2, send: 0.4 })),
   };
 
+  // 錄好的音效（Kenney Interface Sounds，CC0，在 assets/sfx/）：優先用取樣，還沒載入或載入失敗（例如瀏覽器不支援 ogg）就退回合成音
+  const SAMPLES = {   // 音效名稱 → [檔名, 音量]
+    ui: ['click_001', 0.5], deny: ['error_004', 0.45], undo: ['back_001', 0.45], pickup: ['select_002', 0.5], drop: ['drop_003', 0.55],
+    wrong: ['error_006', 0.5], pause: ['minimize_003', 0.4], resume: ['maximize_003', 0.4], arrive: ['glass_001', 0.4], ready: ['glass_006', 0.3],
+  };
+  const sampleBuf = {};
+  function loadSamples() {
+    Object.values(SAMPLES).forEach(([file]) => {
+      if (sampleBuf[file] !== undefined) return;
+      sampleBuf[file] = null;
+      fetch('assets/sfx/' + file + '.ogg').then(r => r.arrayBuffer()).then(b => new Promise((ok, no) => ac.decodeAudioData(b, ok, no)))
+        .then(buf => { sampleBuf[file] = buf; }).catch(() => {});
+    });
+  }
+  function playSample(name) {
+    const s = SAMPLES[name], buf = s && sampleBuf[s[0]];
+    if (!buf || active >= MAX_SFX_VOICES) return false;
+    const src = ac.createBufferSource(), g = ac.createGain();
+    src.buffer = buf; g.gain.value = s[1];
+    src.connect(g); g.connect(testMode ? deadBus : sfxBus);
+    active++; src.onended = () => { active--; };
+    src.start();
+    return true;
+  }
+
   function play(name, arg) {
     if (window.__manualSim) return;           // 自動化測試：不發聲也不震動（測試把一整局壓縮在幾十毫秒，音效會同時全部起跳）
     Haptic.pulse(name);                       // 震動與音效同名，而且各自有開關
@@ -576,7 +602,7 @@ const Sound = (() => {
     const now = performance.now(), gap = MIN_GAP[name] || 40;
     if (now - (lastAt[name] || -1e9) < gap) return;   // 同名音效太密就略過（狂點時不會變成機關槍）
     lastAt[name] = now;
-    try { S[name](arg); } catch (e) {}
+    try { if (!playSample(name)) S[name](arg); } catch (e) {}
   }
 
   // 背景音樂：五聲音階的隨機漫步旋律 + 低音 + 輕微節奏；最後 20 秒逐漸加快
@@ -595,25 +621,27 @@ const Sound = (() => {
   const RHYTHM = [1, 0, 1, 1, 0, 1, 0, 1];
   function musicStep(t, eighth) {
     const k = step % 8, bar = (step >> 3) % 4;
-    if (feverOn) {                                   // FEVER 版：每拍低音＋太鼓、每個八分音符都有撥弦旋律（拉高），木魚與小鈸打拍
-      if (k % 2 === 0) pluck({ f: BASSF[bar], t, dur: eighth * 3, vol: 0.2, bus: musBus });
-      if (k % 4 === 0) drum(t, 0.2, musBus);
-      if (k % 4 === 2) wood(t, 0.07, musBus, 1200);
+    if (feverOn) {                                   // FEVER 版：每拍低音＋底鼓、每個八分音符都有旋律與小鈸，旋律拉高
+      if (k % 2 === 0) {
+        tone({ f: BASSF[bar], type: 'triangle', t, dur: eighth * 1.8, vol: 0.13, a: 0.01, bus: musBus });
+        tone({ f: 150, f2: 45, type: 'sine', t, dur: 0.14, vol: 0.18, a: 0.003, bus: musBus });
+      }
       mel = Math.max(5, Math.min(12, mel + [-2, -1, 0, 1, 1, 2, 3][rand(7)]));
-      pluck({ f: note(mel), t, dur: eighth * 2.5, vol: 0.15, bus: musBus, send: 0.3 });
+      tone({ f: note(mel), type: 'triangle', t, dur: eighth * 1.6, vol: 0.1, a: 0.004, bus: musBus, send: 0.3 });
+      tone({ f: note(mel) * 2, type: 'square', t, dur: eighth * 0.8, vol: 0.018, a: 0.004, bus: musBus });
       noise({ t, dur: 0.03, vol: k % 2 ? 0.03 : 0.018, type: 'highpass', f: 7000, bus: musBus });
       return;
     }
     if (k === 0) {
-      pluck({ f: BASSF[bar], t, dur: eighth * 7, vol: 0.2, bus: musBus });
-      tone({ f: BASSF[bar], type: 'triangle', t, dur: eighth * 7, vol: 0.04, a: 0.05, bus: musBus });
-      if (bar % 2 === 0 && Math.random() < 0.7) flute({ f: note(Math.max(5, mel)), t: t + eighth * 0.5, dur: eighth * 6, vol: 0.05, send: 0.4 });   // 竹笛：兩小節一個長音
+      tone({ f: BASSF[bar], type: 'triangle', t, dur: eighth * 7, vol: 0.12, a: 0.03, bus: musBus });
+      tone({ f: BASSF[bar] * 2, type: 'sine', t, dur: eighth * 7, vol: 0.04, a: 0.06, bus: musBus });
     }
     if (RHYTHM[k] && Math.random() < (mode === 'title' ? 0.75 : 0.88)) {
       mel = Math.max(3, Math.min(10, mel + [-2, -1, -1, 0, 1, 1, 2][rand(7)]));
-      pluck({ f: note(mel), t, dur: eighth * 3.2, vol: 0.16, bus: musBus, send: 0.35 });
+      tone({ f: note(mel), type: 'triangle', t, dur: eighth * 2.4, vol: 0.09, a: 0.004, bus: musBus, send: 0.35 });
+      tone({ f: note(mel) * 2, type: 'sine', t, dur: eighth * 1.2, vol: 0.02, a: 0.004, bus: musBus });
     }
-    if (mode === 'play' && k % 4 === 2) wood(t, 0.035, musBus, 1300);
+    if (mode === 'play' && k % 4 === 2) noise({ t, dur: 0.03, vol: 0.022, type: 'highpass', f: 7000, bus: musBus });
   }
 
   // 每個影格呼叫：依遊戲狀態調整音樂音量與滋滋聲
@@ -636,6 +664,7 @@ const Sound = (() => {
 
   return {
     unlock, play, tick,
+    get samples() { const f = Object.values(SAMPLES).map(x => x[0]); return { total: f.length, loaded: f.filter(n => sampleBuf[n]).length }; },
     get sfx() { return sfxOn; }, get music() { return musOn; }, get voices() { return active; },
     toggleSfx() { sfxOn = !sfxOn; apply(); save(); if (sfxOn) { unlock(); play('ui'); } },
     toggleMusic() { musOn = !musOn; apply(); save(); unlock(); },
@@ -643,7 +672,10 @@ const Sound = (() => {
     // 開發用：逐一觸發每個音效，回傳有丟出例外的（play() 會吞掉例外，所以測試要走這裡）
     test() {                                  // 逐一觸發每個音效檢查會不會丟例外；走「假出口」，所以不會出聲
       const errs = []; testMode = true;
-      try { Object.keys(S).forEach(k => { try { S[k](3); } catch (e) { errs.push(k + ': ' + e.message); } }); } finally { testMode = false; }
+      try {
+        Object.keys(S).forEach(k => { try { S[k](3); } catch (e) { errs.push(k + ': ' + e.message); } });
+        Object.keys(SAMPLES).forEach(k => { try { playSample(k); } catch (e) { errs.push('sample ' + k + ': ' + e.message); } });
+      } finally { testMode = false; }
       return { state: ac && ac.state, errs };
     },
     suspend() { if (ac && ac.state === 'running') ac.suspend(); },
