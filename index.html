@@ -66,13 +66,17 @@ const CFG = {
   wrongPatienceHit: 0.12,  // 送錯餐：扣客人耐心比例
   tipScore: 20,            // 熟了/完美且耐心 > 50% 的小費
   streakBonus: 20,         // 連續完美，每多一次加的分
+  // FEVER TIME：交出好餐點會充能量條，滿了進入狂熱——期間得分加倍、客人耐心凍結。
+  // 失誤只扣一部分、不歸零；FEVER 期間不再充能，結束後能量條從 0 重來。
+  fever: { perfect: 0.25, good: 0.12, wrong: -0.08, walkout: -0.15, seconds: 12, mult: 2, spawnMult: 0.3 },
+  // 狂熱期間：串一放上烤架（或手上拿著）就直接是完美、而且不會焦；來客間隔縮成 spawnMult 倍、隊伍直接開到上限
   // 結算稱號門檻（以機器人實測校準；機器人沒有思考時間，真人通常落在 1.0~1.4 秒/動作 的區間）
-  //   0.45 秒/動作 ≈ 7200 分、0.7 ≈ 5300、1.0 ≈ 2700、1.4 ≈ 800、1.8 ≈ 270
+  //   加入 FEVER（直接完美＋人潮）後重測：0.45 秒/動作 ≈ 12000 分、1.0 ≈ 3700、1.4 ≈ 1000（FEVER 前分別是 7200 / 2700 / 800，所以門檻上調）
   ranks: [
     { min: 0,    name: '新手小學徒',   color: '#b0bec5' },
-    { min: 800,  name: '夜市小幫手',   color: '#81c784' },
-    { min: 2000, name: '海邊烤肉達人', color: '#4fc3f7' },
-    { min: 4500, name: '中秋烤肉之神', color: '#ffd54f' },
+    { min: 1000, name: '夜市小幫手',   color: '#81c784' },
+    { min: 2800, name: '海邊烤肉達人', color: '#4fc3f7' },
+    { min: 7000, name: '中秋烤肉之神', color: '#ffd54f' },
   ],
 };
 
@@ -235,8 +239,25 @@ function newGame() {
     rushed: false,                    // 是否已經宣告「最後衝刺」
     shown: 0, asmT: -9,               // shown：HUD 顯示的分數（會滾動追上 score）；asmT：最後一次加食材的時間（彈跳動畫）
     newBadge: INGREDIENTS.map(() => 0),   // 剛解鎖的食材：托盤上顯示幾秒鐘的紅色提示
-    stats: { perfect: 0, good: 0, meh: 0, bad: 0, wrong: 0, walkout: 0 },
+    stats: { perfect: 0, good: 0, meh: 0, bad: 0, wrong: 0, walkout: 0, fever: 0 },
+    meter: 0, fever: 0,               // meter：FEVER 能量 0~1；fever：狂熱剩餘秒數（0＝沒在狂熱）
+    fvK: 0, fvFx: 0,                  // fvK：狂熱的視覺混合度 0~1（淡入淡出）；fvFx：餘燼特效計時
   };
+}
+
+// 能量條增減；滿了就進入 FEVER TIME
+function chargeMeter(d) {
+  if (G.fever > 0) return;
+  G.meter = Math.max(0, Math.min(1, G.meter + d));
+  if (G.meter >= 1) startFever();
+}
+function startFever() {
+  G.fever = CFG.fever.seconds; G.meter = 1; G.stats.fever++;
+  popup('🔥 FEVER TIME！串串直接完美 · 得分 ×' + CFG.fever.mult, W / 2, 420, '#ffd36b');
+  G.spawnTimer = Math.min(G.spawnTimer, 0.4);                 // 狂熱一開始人潮馬上湧進來
+  Sound.play('fever');
+  FX.shake = 0.3;
+  for (let k = 0; k < 4; k++) FX.emit(14, { x: 90 + k * 120, y: 330, angle: -Math.PI / 2, arc: 1.4, speed: 260, life: 1.3, size: 8, color: ['#ffd54f', '#ff8a65', '#e0412c', '#fff8e8'], kind: 'spark', g: 200, drag: 0.6 });
 }
 
 function startGame() { newGame(); FX.clear(); state = 'playing'; paused = false; Sound.play('start'); }
@@ -360,7 +381,7 @@ const Sound = (() => {
   const note = i => PENTA[Math.max(0, Math.min(PENTA.length - 1, i))];
   const BASSF = [130.81, 110.0, 98.0, 146.83];       // 低音：C A G D，一小節換一個
   const MODE_VOL = { title: 0.8, play: 0.9, pause: 0.3, over: 0.6 };
-  let mode = 'title', lastSizzle = 0, nextT = 0, step = 0, mel = 6;
+  let mode = 'title', lastSizzle = 0, nextT = 0, step = 0, mel = 6, feverOn = false;
 
   function init() {
     if (ac) return ac;
@@ -473,6 +494,8 @@ const Sound = (() => {
     resume:  () => tone({ f: 300, f2: 600, type: 'triangle', dur: 0.12, vol: 0.12 }),
     start:   () => { noise({ dur: 0.4, vol: 0.12, type: 'bandpass', f: 400, f2: 3000, q: 0.8, a: 0.05 }); [0, 4, 5].forEach((d, k) => tone({ f: note(d + 2), type: 'triangle', t: 0.1 + k * 0.08, dur: 0.3, vol: 0.16, send: 0.2 })); },
     over:    () => { [5, 7, 8, 10].forEach((d, k) => tone({ f: note(d), type: 'triangle', t: k * 0.12, dur: 0.3, vol: 0.2, send: 0.3 })); tone({ f: note(12), type: 'sine', t: 0.5, dur: 1.0, vol: 0.18, send: 0.4 }); },
+    fever:   () => { noise({ dur: 0.6, vol: 0.14, type: 'bandpass', f: 300, f2: 5000, q: 0.8, a: 0.05 }); [0, 2, 4, 7, 9].forEach((d, k) => tone({ f: note(5 + d), type: 'triangle', t: k * 0.06, dur: 0.5, vol: 0.2, send: 0.35 })); tone({ f: 110, f2: 50, dur: 0.3, vol: 0.2 }); },
+    feverEnd: () => [9, 7, 5, 3].forEach((d, k) => tone({ f: note(d), type: 'triangle', t: k * 0.08, dur: 0.3, vol: 0.14, send: 0.25 })),
     record:  () => [9, 10, 11, 12].forEach((d, k) => tone({ f: note(d), type: 'sine', t: 0.9 + k * 0.08, dur: 0.4, vol: 0.12, send: 0.4 })),
   };
 
@@ -491,7 +514,7 @@ const Sound = (() => {
     if (mode === 'title') return 84;
     if (mode === 'over') return 78;
     const tl = (typeof G === 'object' && G && state === 'playing') ? G.timeLeft : 90;
-    return 100 + (tl <= 20 ? (20 - tl) / 20 * 26 : 0);
+    return 100 + (tl <= 20 ? (20 - tl) / 20 * 26 : 0) + (feverOn ? 28 : 0);
   }
   function schedule() {
     if (!ac || ac.state !== 'running' || !musOn) { nextT = 0; return; }
@@ -502,6 +525,17 @@ const Sound = (() => {
   const RHYTHM = [1, 0, 1, 1, 0, 1, 0, 1];
   function musicStep(t, eighth) {
     const k = step % 8, bar = (step >> 3) % 4;
+    if (feverOn) {                                   // FEVER 版：每拍低音＋底鼓、每個八分音符都有旋律與小鈸，旋律拉高
+      if (k % 2 === 0) {
+        tone({ f: BASSF[bar], type: 'triangle', t, dur: eighth * 1.8, vol: 0.13, a: 0.01, bus: musBus });
+        tone({ f: 150, f2: 45, type: 'sine', t, dur: 0.14, vol: 0.18, a: 0.003, bus: musBus });
+      }
+      mel = Math.max(5, Math.min(12, mel + [-2, -1, 0, 1, 1, 2, 3][rand(7)]));
+      tone({ f: note(mel), type: 'triangle', t, dur: eighth * 1.6, vol: 0.1, a: 0.004, bus: musBus, send: 0.3 });
+      tone({ f: note(mel) * 2, type: 'square', t, dur: eighth * 0.8, vol: 0.018, a: 0.004, bus: musBus });
+      noise({ t, dur: 0.03, vol: k % 2 ? 0.03 : 0.018, type: 'highpass', f: 7000, bus: musBus });
+      return;
+    }
     if (k === 0) {
       tone({ f: BASSF[bar], type: 'triangle', t, dur: eighth * 7, vol: 0.12, a: 0.03, bus: musBus });
       tone({ f: BASSF[bar] * 2, type: 'sine', t, dur: eighth * 7, vol: 0.04, a: 0.06, bus: musBus });
@@ -519,6 +553,7 @@ const Sound = (() => {
     if (!ac) return;
     const m = state === 'title' ? 'title' : state === 'over' ? 'over' : paused ? 'pause' : 'play';
     if (m !== mode) { mode = m; musMode.gain.setTargetAtTime(MODE_VOL[m], ac.currentTime, 0.15); }
+    feverOn = m === 'play' && !!G && G.fever > 0;
     const cook = (state === 'playing' && !paused && !rotateHint && G) ? G.grill.filter(Boolean).length : 0;
     const target = Math.min(0.045, cook * 0.0075 * (0.6 + 0.4 * fire));   // 白噪音很響，所以係數要小：6 串約和音樂同一個量級
     if (Math.abs(target - lastSizzle) > 0.002) { sizzleG.gain.setTargetAtTime(target, ac.currentTime, 0.12); lastSizzle = target; }
@@ -587,7 +622,7 @@ function makeOrder() {
 }
 
 function customerCap() {
-  return Math.min(curve(elapsed()).cap, CFG.customerSlots);
+  return G.fever > 0 ? CFG.customerSlots : Math.min(curve(elapsed()).cap, CFG.customerSlots);
 }
 
 function spawnCustomer() {
@@ -604,7 +639,7 @@ function spawnCustomer() {
     state: 'waiting', shake: 0, mood: '', timer: 0,
   });
   G.spawnCount++;
-  G.spawnTimer = G.spawnCount < 2 ? 2.5 : curve(elapsed()).spawn * (0.85 + Math.random() * 0.3);   // ±15% 隨機，來客不要太規律
+  G.spawnTimer = G.spawnCount < 2 ? 2.5 : curve(elapsed()).spawn * (0.85 + Math.random() * 0.3) * (G.fever > 0 ? CFG.fever.spawnMult : 1);   // ±15% 隨機，來客不要太規律
 }
 
 function update(dt) {
@@ -616,6 +651,18 @@ function update(dt) {
   if (G.timeLeft <= 0) { G.timeLeft = 0; endGame(); return; }
   const sec1 = Math.ceil(G.timeLeft);
   if (sec1 !== sec0 && sec1 <= 5) Sound.play('tick');   // 最後 5 秒每秒一聲
+
+  // FEVER TIME 倒數與視覺淡入淡出
+  if (G.fever > 0) {
+    G.fever -= dt;
+    if (G.fever <= 0) { G.fever = 0; G.meter = 0; Sound.play('feverEnd'); }
+    G.fvFx -= dt;
+    if (G.fvFx <= 0) {                                              // 往上飄的餘燼
+      G.fvFx = 0.1;
+      FX.emit(1, { x: Math.random() * W, y: QUEUE.counterY, angle: -Math.PI / 2, arc: 0.5, speed: 90, life: 1.4, size: 4, color: ['#ffd54f', '#ff8a65'], kind: 'spark', g: -20 });
+    }
+  }
+  G.fvK += ((G.fever > 0 ? 1 : 0) - G.fvK) * Math.min(1, dt * 5);
 
   // 解鎖新食材
   INGREDIENTS.forEach((ing, i) => {
@@ -636,10 +683,12 @@ function update(dt) {
   }
 
   // 烤架
+  const perfectT = CFG.stages[2].until + 0.01;                       // 完美階段的起點
+  if (G.fever > 0 && G.held) G.held.sk.t = perfectT;                 // 狂熱：手上的串也一樣是完美
   G.grill.forEach((sk, i) => {
     if (!sk) return;
     const before = stageOf(sk.t);
-    sk.t += dt * sk.speed * fire;
+    if (G.fever > 0) sk.t = perfectT; else sk.t += dt * sk.speed * fire;   // 狂熱：一律完美且不再往前烤（不會焦）
     const after = stageOf(sk.t);
     const rs = L.slot(i), sx = rs.x + rs.w / 2;
     if (before < 3 && after === 3) {                               // 進入完美：輕輕「叮」一聲，並迸出一圈火花
@@ -672,11 +721,11 @@ function update(dt) {
     if (c.shake > 0) c.shake -= dt;
     if (c.state === 'waiting') {
       if (!c.arrived) return;                            // 走到定位才開始點餐、耐心才開始倒數
-      c.patience -= dt;
+      if (G.fever <= 0) c.patience -= dt;                // FEVER 期間耐心凍結
       if (c.patience <= 0) {
         c.state = 'leaving'; c.mood = '💢'; c.timer = 0.9;
         G.score = Math.max(0, G.score - CFG.walkoutPenalty);
-        G.stats.walkout++; G.streak = 0;
+        G.stats.walkout++; G.streak = 0; chargeMeter(CFG.fever.walkout);
         popup('-' + CFG.walkoutPenalty + ' 客人走了', c.x, QUEUE.headTop + 40, '#ff8a80');
         Sound.play('walkout');
         FX.emit(6, { x: c.x, y: QUEUE.headTop + 30, speed: 120, life: 0.5, size: 4, color: '#ff5252', g: 200 });
@@ -760,7 +809,7 @@ function serve(ci) {
   if (!same) {
     c.shake = 0.4;
     c.patience -= c.max * CFG.wrongPatienceHit;
-    G.stats.wrong++;
+    G.stats.wrong++; chargeMeter(CFG.fever.wrong);
     popup('❌ 不是這個！', cx, py, '#ff8a80');
     Sound.play('wrong');
     FX.emit(8, { x: cx, y: py, speed: 140, life: 0.5, size: 4, color: '#ff5252', g: 200 });
@@ -780,7 +829,9 @@ function serve(ci) {
     G.streak = 0;
     if (st === 2) G.stats.good++; else if (st === 1) G.stats.meh++; else G.stats.bad++;
   }
+  if (G.fever > 0 && pts > 0) { pts *= CFG.fever.mult; note += ' FEVER ×' + CFG.fever.mult; }
   G.score = Math.max(0, G.score + pts);
+  if (st === 3) chargeMeter(CFG.fever.perfect); else if (st === 2) chargeMeter(CFG.fever.good);
   Sound.play(st === 3 ? 'perfect' : st === 2 ? 'good' : st === 1 ? 'meh' : 'bad', G.streak);
   fxServe(c, st, G.streak);
   if (pts > 0) FX.bump = 0.3;
@@ -994,27 +1045,39 @@ function drawBackground() {
   }
   // 烤架區 / 下方
   ctx.fillStyle = '#1a1512'; ctx.fillRect(0, 318, W, 330);
-  ctx.drawImage(waveLayer(), 0, 648 - 318, W, H - 648, 0, 648, W, H - 648);   // 下方操作區：夜藍色的海浪紋底
+  ctx.drawImage(waveLayer(false), 0, 648 - 318, W, H - 648, 0, 648, W, H - 648);   // 下方操作區：夜藍色的海浪紋底
+  if (G && G.fvK > 0.01) {                              // FEVER TIME：下方改成酒紅色海浪紋，上方與烤架區罩一層脈動的熱紅光
+    const p = 0.5 + 0.5 * Math.sin(clock * 8);
+    ctx.globalAlpha = G.fvK;
+    ctx.drawImage(waveLayer(true), 0, 648 - 318, W, H - 648, 0, 648, W, H - 648);
+    ctx.globalAlpha = G.fvK * (0.2 + 0.12 * p);
+    ctx.fillStyle = '#ff4a2a'; ctx.fillRect(0, 0, W, 318);
+    ctx.globalAlpha = G.fvK * (0.3 + 0.1 * p);
+    ctx.fillStyle = '#7a1420'; ctx.fillRect(0, 318, W, 330);
+    ctx.globalAlpha = 1;
+  }
 }
 
-// 青海波紋（深夜藍底、淡淡的同心弧）。只畫一次，快取成圖
-let WAVE = null;
-function waveLayer() {
-  if (WAVE) return WAVE;
-  WAVE = document.createElement('canvas'); WAVE.width = W; WAVE.height = H - 318;
-  const g = WAVE.getContext('2d'), R = 27;
-  g.fillStyle = UI.night; g.fillRect(0, 0, W, WAVE.height);
-  for (let j = 0; j * R * 0.5 < WAVE.height + R; j++) {
+// 青海波紋（深夜藍底、淡淡的同心弧）。只畫一次，快取成圖；fever 版是酒紅色
+const WAVE = {};
+function waveLayer(fever) {
+  const key = fever ? 'f' : 'n';
+  if (WAVE[key]) return WAVE[key];
+  const cv = WAVE[key] = document.createElement('canvas'); cv.width = W; cv.height = H - 318;
+  const g = cv.getContext('2d'), R = 27;
+  const c1 = fever ? '#3d0f22' : UI.night, c2 = fever ? '#541529' : '#1a1f45', line = fever ? 'rgba(255,190,120,.2)' : 'rgba(170,180,255,.13)';
+  g.fillStyle = c1; g.fillRect(0, 0, W, cv.height);
+  for (let j = 0; j * R * 0.5 < cv.height + R; j++) {
     for (let i = -1; i * R * 2 < W + R * 2; i++) {
       const cx = i * R * 2 + (j % 2) * R, cy = j * R * 0.5;
       for (let k = 3; k >= 1; k--) {
         g.beginPath(); g.arc(cx, cy, R * k / 3, 0, Math.PI * 2);
-        g.fillStyle = k % 2 ? UI.night : '#1a1f45'; g.fill();
-        g.strokeStyle = 'rgba(170,180,255,.13)'; g.lineWidth = 1.5; g.stroke();
+        g.fillStyle = k % 2 ? c1 : c2; g.fill();
+        g.strokeStyle = line; g.lineWidth = 1.5; g.stroke();
       }
     }
   }
-  return WAVE;
+  return cv;
 }
 
 function drawProceduralSky() {
@@ -1388,7 +1451,18 @@ function drawHint() {
   }
   else if (G.assembly.length) text = '點烤架空位放上去烤（或按「放上烤架」）';
   else text = '點烤好的串可以拿起來';
-  T(text, W / 2, 770, 16, color, 'center', '700', 3);
+  T(text, W / 2, 779, 15, color, 'center', '700', 3);
+}
+
+// FEVER 能量條：組裝列與食材托盤之間的細長條。平常是橘色填充；狂熱時變成金紅閃爍並隨剩餘秒數倒退
+function drawFeverBar() {
+  const x = 24, y = 753, w = 492, h = 11, on = G.fever > 0;
+  const k = on ? G.fever / CFG.fever.seconds : G.meter;
+  const p = on ? 0.5 + 0.5 * Math.sin(clock * 12) : 0;
+  ctx.fillStyle = UI.nightDeep; rr(x - 3, y - 3, w + 6, h + 6, 10); ctx.fill();
+  ctx.strokeStyle = on ? UI.gold : UI.paper; ctx.lineWidth = 2.5; ctx.stroke();
+  if (k > 0.01) { ctx.fillStyle = on ? `rgb(255,${170 + p * 60 | 0},${60 + p * 50 | 0})` : UI.orange; rr(x, y, Math.max(h, w * k), h, 7); ctx.fill(); }
+  T(on ? '🔥 FEVER TIME  得分 ×' + CFG.fever.mult + '  ' + G.fever.toFixed(1) + 's' : 'FEVER', x + w / 2, y + h / 2 + 1, 10, '#fff8e8', 'center', '900', 3);
 }
 
 function drawHeld() {
@@ -1614,6 +1688,7 @@ function drawScene() {
   G.customers.forEach(drawCustomerHud);
   for (let i = 0; i < CFG.grillSlots; i++) drawSlot(i);
   drawAssemblyRow();
+  drawFeverBar();
   drawHint();
   drawTray();
   if (!touchMode) T('1~6 食材 · Space 放上烤架 · QWE/ASD 取放烤串 · YUIOP 交餐 · X 丟棄 · Esc 暫停 · M 靜音', W / 2, 952, 11, 'rgba(255,255,255,.4)');

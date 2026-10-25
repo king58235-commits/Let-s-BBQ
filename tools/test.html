@@ -149,6 +149,51 @@ game('交餐與計分', function (assert) {
   return '2/3/4 個食材的完美單：+' + p2 + ' / +' + p3 + ' / +' + p4 + '（倍率 ' + (p3 / p2).toFixed(2) + '、' + (p4 / p2).toFixed(2) + '）；送錯順序不收件';
 });
 
+game('FEVER TIME', function (assert) {
+  startGame(); G.spawnTimer = 999;
+  const F = CFG.fever;
+  const mk = (o, p) => ({ animal: 'bear', order: o, max: 30, patience: p || 25, age: 1, x: L.qx(0), arrived: true, state: 'waiting', shake: 0, mood: '', timer: 0 });
+  const serveWith = (order, t) => {
+    G.customers = [mk(order)];
+    G.held = { sk: { items: order.slice(), t, speed: 0, born: clock }, from: 0 };
+    const before = G.score; serve(0); return G.score - before;
+  };
+  // 充能：熟了與完美各充一點，送錯與氣走各扣一點，不低於 0
+  serveWith(['pork', 'corn'], 6);
+  assert(Math.abs(G.meter - F.good) < 1e-9, '「熟了」應該充 ' + F.good + '：' + G.meter);
+  G.streak = 0; serveWith(['pork', 'corn'], 8.6);
+  assert(Math.abs(G.meter - (F.good + F.perfect)) < 1e-9, '「完美」應該再充 ' + F.perfect + '：' + G.meter);
+  G.customers = [mk(['pork', 'corn'])]; G.held = { sk: { items: ['corn', 'pork'], t: 8.6, speed: 0, born: clock }, from: 0 }; serve(0);
+  assert(Math.abs(G.meter - (F.good + F.perfect + F.wrong)) < 1e-9, '送錯應該扣 ' + -F.wrong + '：' + G.meter);
+  chargeMeter(-5); assert(G.meter === 0, '能量不該低於 0');
+  // 滿了就進入 FEVER；期間不再充能，得分加倍，耐心凍結
+  G.meter = 0.9; const normal = serveWith(['pork', 'corn'], 6);
+  G.meter = 0.9; G.streak = 0; G.customers = [mk(['pork', 'corn'])]; G.held = { sk: { items: ['pork', 'corn'], t: 8.6, speed: 0, born: clock }, from: 0 }; serve(0);
+  assert(G.fever === F.seconds && G.stats.fever === 1, '能量滿了應該進入 FEVER');
+  G.customers = [mk(['pork', 'corn'], 20)]; const p0 = G.customers[0].patience;
+  update(1); assert(G.customers[0].patience === p0, 'FEVER 期間客人耐心應該凍結');
+  assert(G.fever < F.seconds, 'FEVER 倒數沒有走');
+  // 狂熱：生的、烤焦的串都會變成完美，而且久放不會焦；人潮湧入、隊伍開到上限
+  G.grill[0] = makeSkewer(['pork', 'corn']); G.grill[1] = makeSkewer(['pork', 'corn']); G.grill[1].t = 12;
+  G.held = { sk: makeSkewer(['corn', 'pork']), from: 2 };
+  for (let i = 0; i < 40; i++) update(0.05);
+  assert(stageOf(G.grill[0].t) === 3 && stageOf(G.grill[1].t) === 3 && stageOf(G.held.sk.t) === 3, 'FEVER 期間的串應該全是完美（含手上的）');
+  G.held = null; G.grill = G.grill.map(() => null); G.customers = []; G.spawnTimer = 0.1; G.timeLeft = 40;   // 回到中段（平常約每 5 秒來一位）
+  for (let i = 0; i < 170 && G.fever > 0; i++) update(0.05);
+  assert(G.customers.length >= 4, 'FEVER 期間來客應該大幅變快、隊伍接近上限：' + G.customers.length);
+  G.customers = [mk(['pork', 'corn'], 20)]; G.fever = F.seconds;
+  const m0 = G.meter; const dbl = serveWith(['pork', 'corn'], 6);
+  assert(dbl === normal * F.mult, 'FEVER 期間得分應該 ×' + F.mult + '：' + dbl + ' vs ' + normal);
+  assert(G.meter === m0, 'FEVER 期間不該充能');
+  // 結束後能量歸零，可以再次累積
+  for (let i = 0; i < 400 && G.fever > 0; i++) update(0.05);
+  assert(G.fever === 0 && G.meter === 0, 'FEVER 結束後能量應該歸零');
+  for (let i = 0; i < 40; i++) update(0.05);
+  assert(G.fvK < 0.02, '視覺混合度沒有淡出：' + G.fvK);
+  goTitle();
+  return '充能 熟了 +' + F.good + '／完美 +' + F.perfect + '，送錯 ' + F.wrong + '；滿了進入 ' + F.seconds + ' 秒 FEVER，得分 ×' + F.mult + '、耐心凍結、不再充能，結束後歸零';
+});
+
 /* ---------- 3. 壓力測試 ---------- */
 game('隨機壓力測試', function (assert) {
   const keys = [...Object.keys(KEY_ING), ...Object.keys(KEY_SLOT), ...Object.keys(KEY_CUST), 'Space', 'Backspace', 'KeyX', 'Escape', 'Enter', 'Minus', 'Equal', 'KeyM'];
@@ -243,6 +288,11 @@ game('繪圖冒煙測試', function (assert) {
   [true, false].forEach(tm => {
     touchMode = tm;
     t('標題', () => { goTitle(); draw(); });
+    t('FEVER 中', () => {
+      startGame(); G.spawnTimer = 999; G.meter = 0.6; draw();
+      startFever(); G.fvK = 1; draw(); for (let i = 0; i < 20; i++) update(0.05); draw();
+      Sound.play('fever'); Sound.play('feverEnd'); G.fever = 0.01; update(0.05); draw();
+    });
     t('遊戲中', () => {
       startGame(); G.timeLeft = 30; G.spawnTimer = 999; G.unlocked = G.unlocked.map(() => true); G.newBadge[3] = 5; G.streak = 3;
       G.customers = [mk('bear', ['pork', 'scallion', 'corn', 'eggplant'], 20, 0), mk('rabbit', ['pork', 'corn'], 5, 1), mk('fox', ['corn', 'shrimp', 'scallion'], 20, 2), mk('panda', ['pork', 'corn'], 20, 3), mk('wolf', ['pork', 'corn'], 20, 4)];
