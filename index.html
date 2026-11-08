@@ -783,12 +783,14 @@ function update(dt) {
   }
 
   // 烤架
-  const perfectT = CFG.stages[2].until + 0.01;                       // 完美階段的起點
-  if (G.fever > 0 && G.held) G.held.sk.t = perfectT;                 // 狂熱：手上的串也一樣是完美
+  const perfectT = (CFG.stages[2].until + CFG.stages[3].until) / 2;  // 完美階段的正中間
+  if (G.fever > 0 && G.held) G.held.sk.locked = true;                // 狂熱：手上的串也一樣鎖定完美
+  if (G.held && G.held.sk.locked) G.held.sk.t = perfectT;
   G.grill.forEach((sk, i) => {
     if (!sk) return;
     const before = stageOf(sk.t);
-    if (G.fever > 0) sk.t = perfectT; else sk.t += dt * sk.speed * fire;   // 狂熱：一律完美且不再往前烤（不會焦）
+    if (G.fever > 0) sk.locked = true;                                      // 狂熱期間在烤架上的串一律鎖定
+    if (sk.locked) sk.t = perfectT; else sk.t += dt * sk.speed * fire;      // 鎖定的串永遠是完美、不會焦，狂熱結束後也一樣，直到交出或丟掉
     const after = stageOf(sk.t);
     const rs = L.slot(i), sx = rs.x + rs.w / 2;
     if (before < 3 && after === 3) {                               // 進入完美：輕輕「叮」一聲，並迸出一圈火花

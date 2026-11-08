@@ -190,12 +190,20 @@ game('FEVER TIME', function (assert) {
   for (let i = 0; i < 170 && G.fever > 0; i++) update(0.05);
   assert(G.customers.length >= 4, 'FEVER 期間來客應該大幅變快、隊伍接近上限：' + G.customers.length);
   G.customers = [mk(['pork', 'corn'], 20)]; G.fever = F.seconds;
+  // 狂熱期間放上烤架的串被鎖定成完美：狂熱結束後放再久也不會焦；結束後才放的串照常烤
+  G.grill[0] = makeSkewer(['pork', 'corn']); G.grill[1] = makeSkewer(['pork', 'corn']); G.grill[1].t = 12;
+  G.held = { sk: makeSkewer(['corn', 'pork']), from: 2 };
+  update(0.05);
   const m0 = G.meter; const dbl = serveWith(['pork', 'corn'], 6);
   assert(dbl === normal * F.mult, 'FEVER 期間得分應該 ×' + F.mult + '：' + dbl + ' vs ' + normal);
   assert(G.meter === m0, 'FEVER 期間不該充能');
   // 結束後能量歸零，可以再次累積
   for (let i = 0; i < 400 && G.fever > 0; i++) update(0.05);
   assert(G.fever === 0 && G.meter === 0, 'FEVER 結束後能量應該歸零');
+  G.grill[2] = makeSkewer(['pork', 'corn']);
+  for (let i = 0; i < 400; i++) update(0.05);                      // 再過 20 秒
+  assert(stageOf(G.grill[0].t) === 3 && stageOf(G.grill[1].t) === 3, '狂熱期間放上去的串，結束後應該仍鎖定在完美：' + G.grill[0].t.toFixed(1) + '／' + G.grill[1].t.toFixed(1));
+  assert(stageOf(G.grill[2].t) === 4, '狂熱結束後才放的串應該照常烤（20 秒後該焦了）：' + G.grill[2].t.toFixed(1));
   for (let i = 0; i < 40; i++) update(0.05);
   assert(G.fvK < 0.02, '視覺混合度沒有淡出：' + G.fvK);
   goTitle();
