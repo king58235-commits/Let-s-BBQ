@@ -202,6 +202,40 @@ game('FEVER TIME', function (assert) {
   return '充能 熟了 +' + F.good + '／完美 +' + F.perfect + '，送錯 ' + F.wrong + '；滿了進入 ' + F.seconds + ' 秒 FEVER，得分 ×' + F.mult + '、耐心凍結、不再充能，結束後歸零';
 });
 
+game('點單氣泡不互相重疊', function (assert) {
+  // 個子高矮不同的角色、長短不同的點單、站在不同位置：任兩個氣泡都不該重疊，也不能頂到最上方的時間／分數列
+  const mk = (a, o, i) => ({ animal: a, order: o, max: 30, patience: 25, age: 5, x: L.qx(i), arrived: true, state: 'waiting', shake: 0, mood: '', timer: 0 });
+  const ids = CUSTOMERS.map(c => c.id), rnd = n => Math.floor(Math.random() * n);
+  let worst = 99, cases = 0;
+  startGame(); G.spawnTimer = 999;
+  for (let run = 0; run < 3000; run++) {
+    const pool = ids.slice(), n = 2 + rnd(CFG.customerSlots - 1);
+    G.customers = [];
+    for (let i = 0; i < n; i++) {
+      const len = 2 + rnd(3), order = Array.from({ length: len }, () => 'pork');
+      G.customers.push(mk(pool.splice(rnd(pool.length), 1)[0], order, i));
+    }
+    if (run % 3 === 0) G.customers.forEach(c => { c.x += rnd(60) - 30; });     // 滑動途中的位置
+    if (run % 5 === 0) G.customers[rnd(n)].state = 'leaving';
+    const rects = [];
+    G.customers.forEach((c, i) => {
+      if (c.state === 'leaving') return;
+      const a = custLayout(c, i), w = c.order.length * 28 + 10, y = bubbleTop(i);
+      assert(y >= 52, '氣泡頂到時間／分數列：y=' + y);
+      rects.push({ x: a.x - w / 2, y, w, h: 34, i });
+    });
+    for (let a = 0; a < rects.length; a++) for (let b = a + 1; b < rects.length; b++) {
+      const A = rects[a], B = rects[b];
+      const dx = Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x);
+      const dy = Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y);
+      if (dx > 0) { worst = Math.min(worst, -dy); assert(dy <= 0, '第 ' + A.i + '、' + B.i + ' 位客人的氣泡重疊（水平 ' + dx.toFixed(0) + 'px、垂直 ' + dy.toFixed(0) + 'px）'); }
+      cases++;
+    }
+  }
+  goTitle();
+  return '3000 種隨機隊伍（含滑動中、離場中）檢查 ' + cases + ' 對氣泡，沒有重疊；水平重疊的兩個氣泡垂直最小間隔 ' + worst.toFixed(1) + 'px';
+});
+
 /* ---------- 3. 壓力測試 ---------- */
 game('隨機壓力測試', function (assert) {
   const keys = [...Object.keys(KEY_ING), ...Object.keys(KEY_SLOT), ...Object.keys(KEY_CUST), 'Space', 'Backspace', 'KeyX', 'Escape', 'Enter', 'Minus', 'Equal', 'KeyM'];
